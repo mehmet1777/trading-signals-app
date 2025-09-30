@@ -127,7 +127,7 @@ export default function TradingSimulator() {
       // Trade geçmişini yükle
       const savedHistory = localStorage.getItem('tradeHistory')
       if (savedHistory) {
-        const history = JSON.parse(savedHistory).map((trade: any) => ({
+        const history = JSON.parse(savedHistory).map((trade: { startTime: string; endTime: string; [key: string]: any }) => ({
           ...trade,
           startTime: new Date(trade.startTime),
           endTime: new Date(trade.endTime)
@@ -197,7 +197,7 @@ export default function TradingSimulator() {
       // Method 1: dom-to-image (LAB color için daha iyi)
       console.log('Method 1: dom-to-image deneniyor...')
       try {
-        dataUrl = await (domtoimage as any).toPng(element, {
+        dataUrl = await (domtoimage as { toPng: (element: Element, options: any) => Promise<string> }).toPng(element, {
           quality: 1.0,
           bgcolor: '#1f2937',
           width: element.offsetWidth,
@@ -214,7 +214,7 @@ export default function TradingSimulator() {
             logging: false,
             useCORS: false,
             allowTaint: true
-          } as any)
+          })
           dataUrl = canvas.toDataURL('image/png')
           console.log('html2canvas basit ayarlar başarılı!')
         } catch (html2Error) {
@@ -304,8 +304,8 @@ export default function TradingSimulator() {
         const response = await fetch('https://api.binance.com/api/v3/ticker/24hr')
         const data = await response.json()
         const pairs = data
-          .filter((item: any) => item.symbol.endsWith('USDT'))
-          .map((item: any) => ({
+          .filter((item: { symbol: string }) => item.symbol.endsWith('USDT'))
+          .map((item: { symbol: string; lastPrice: string }) => ({
             symbol: item.symbol,
             baseAsset: item.symbol.replace('USDT', ''),
             quoteAsset: 'USDT',
@@ -887,7 +887,7 @@ export default function TradingSimulator() {
       document.removeEventListener('touchmove', handleGlobalTouchMove)
       document.removeEventListener('touchend', handleGlobalTouchEnd)
     }
-  }, [isDragging, dragStart, buttonPosition])
+  }, [isDragging, dragStart, buttonPosition, handleDragEnd, handleMouseMove, handleTouchMove])
   // Filtrelenmiş trading çiftleri
   const filteredPairs = tradingPairs.filter(pair => 
     pair.symbol.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -1171,7 +1171,7 @@ export default function TradingSimulator() {
                     <div className="mt-3 p-3 bg-red-900/30 border border-red-500/50 rounded-xl flex items-center space-x-2 animate-pulse">
                       <span className="text-red-400 text-lg">⚠️</span>
                       <span className="text-red-300 text-sm font-medium">
-                        Maksimum yatırım miktarı $15,000'dır. Daha fazla yatıramazsınız!
+                        Maksimum yatırım miktarı $15,000&apos;dır. Daha fazla yatıramazsınız!
                       </span>
                     </div>
                   )}
@@ -1517,7 +1517,7 @@ export default function TradingSimulator() {
                             } else {
                               alert(`📝 Manuel kopyalama:\n\n${demoShareText}`)
                             }
-                          } catch (error) {
+                          } catch {
                             alert(`📝 Manuel kopyalama:\n\n${demoShareText}`)
                           } finally {
                             document.body.removeChild(textArea)
@@ -1573,7 +1573,7 @@ export default function TradingSimulator() {
             }}
           >
             <button
-              onClick={(e) => {
+              onClick={() => {
                 // Sadece hareket etmediyse close işlemini yap
                 if (!hasMoved && !isDragging) {
                   closeTrade()
@@ -1655,7 +1655,7 @@ export default function TradingSimulator() {
                       <div className="text-sm text-blue-200">
                         <p className="font-medium mb-1">Kullanıcı adınız:</p>
                         <ul className="text-xs space-y-1 text-blue-300">
-                          <li>• Screenshot'ta görünecek</li>
+                          <li>• Screenshot&apos;ta görünecek</li>
                           <li>• Sosyal medya paylaşımlarında yer alacak</li>
                           <li>• Maksimum 20 karakter</li>
                           <li>• Bir kez kaydedilir, sonra hatırlanır</li>
@@ -1917,7 +1917,7 @@ export default function TradingSimulator() {
                           // Method 1: dom-to-image
                           console.log('Paylaşım için dom-to-image deneniyor...')
                           try {
-                            dataUrl = await (domtoimage as any).toPng(element, {
+                            dataUrl = await (domtoimage as { toPng: (element: Element, options: any) => Promise<string> }).toPng(element, {
                               quality: 1.0,
                               bgcolor: '#1f2937',
                               width: element.offsetWidth,
@@ -1937,7 +1937,7 @@ export default function TradingSimulator() {
                                 logging: false,
                                 useCORS: false,
                                 allowTaint: true
-                              } as any)
+                              })
                               
                               dataUrl = canvas.toDataURL('image/png', 1.0)
                               // Canvas'dan blob oluştur
