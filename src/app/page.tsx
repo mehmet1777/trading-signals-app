@@ -197,7 +197,7 @@ export default function TradingSimulator() {
       // Method 1: dom-to-image (LAB color için daha iyi)
       console.log('Method 1: dom-to-image deneniyor...')
       try {
-        dataUrl = await (domtoimage as { toPng: (element: Element, options: { quality: number; bgcolor: string; width: number; height: number }) => Promise<string> }).toPng(element, {
+        dataUrl = await (domtoimage as any).toPng(element, {
           quality: 1.0,
           bgcolor: '#1f2937',
           width: element.offsetWidth,
@@ -501,7 +501,7 @@ export default function TradingSimulator() {
         }, 5000)
       }
     }, 100)
-  }, [])
+  }, [handleLiquidation])
 
   // Trading çifti değiştiğinde WebSocket'i yeniden bağla ve fiyatı güncelle
   useEffect(() => {
@@ -555,7 +555,7 @@ export default function TradingSimulator() {
   }
 
   // Liquidation işlemi
-  const handleLiquidation = (tradeData: TradeData, currentPrice: number) => {
+  const handleLiquidation = useCallback((tradeData: TradeData, currentPrice: number) => {
     const totalLoss = -tradeData.investment // Tüm yatırım kaybedilir
     
     // Trade'i geçmişe kaydet (liquidation olarak)
@@ -579,7 +579,7 @@ export default function TradingSimulator() {
       setActiveTradeData(null)
       localStorage.removeItem('activeTrade')
     }, 100)
-  }
+  }, [])
 
   // Trade başlat
   const startTrade = () => {
@@ -1917,7 +1917,7 @@ export default function TradingSimulator() {
                           // Method 1: dom-to-image
                           console.log('Paylaşım için dom-to-image deneniyor...')
                           try {
-                            dataUrl = await (domtoimage as { toPng: (element: Element, options: { quality: number; bgcolor: string; width: number; height: number }) => Promise<string> }).toPng(element, {
+                            dataUrl = await (domtoimage as any).toPng(element, {
                               quality: 1.0,
                               bgcolor: '#1f2937',
                               width: element.offsetWidth,
