@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import html2canvas from 'html2canvas'
 import * as domtoimage from 'dom-to-image'
 
@@ -127,7 +127,7 @@ export default function TradingSimulator() {
       // Trade geçmişini yükle
       const savedHistory = localStorage.getItem('tradeHistory')
       if (savedHistory) {
-        const history = JSON.parse(savedHistory).map((trade: { startTime: string; endTime: string; [key: string]: any }) => ({
+        const history = JSON.parse(savedHistory).map((trade: { startTime: string; endTime: string; symbol: string; amount: number; leverage: number; type: string; entryPrice: number; exitPrice: number; pnl: number; pnlPercentage: number }) => ({
           ...trade,
           startTime: new Date(trade.startTime),
           endTime: new Date(trade.endTime)
@@ -197,7 +197,7 @@ export default function TradingSimulator() {
       // Method 1: dom-to-image (LAB color için daha iyi)
       console.log('Method 1: dom-to-image deneniyor...')
       try {
-        dataUrl = await (domtoimage as { toPng: (element: Element, options: any) => Promise<string> }).toPng(element, {
+        dataUrl = await (domtoimage as { toPng: (element: Element, options: { quality: number; bgcolor: string; width: number; height: number }) => Promise<string> }).toPng(element, {
           quality: 1.0,
           bgcolor: '#1f2937',
           width: element.offsetWidth,
@@ -328,7 +328,7 @@ export default function TradingSimulator() {
   }, [])
 
   // WebSocket bağlantısı
-  const connectWebSocket = (symbol: string) => {
+  const connectWebSocket = useCallback((symbol: string) => {
     if (wsRef.current) {
       wsRef.current.close()
     }
@@ -501,7 +501,7 @@ export default function TradingSimulator() {
         }, 5000)
       }
     }, 100)
-  }
+  }, [])
 
   // Trading çifti değiştiğinde WebSocket'i yeniden bağla ve fiyatı güncelle
   useEffect(() => {
@@ -527,7 +527,7 @@ export default function TradingSimulator() {
         wsRef.current.close()
       }
     }
-  }, [selectedPair, tradingPairs])
+  }, [selectedPair, tradingPairs, connectWebSocket])
 
   // Liquidation price hesaplama
   const calculateLiquidationPrice = (entryPrice: number, leverage: number, type: 'long' | 'short') => {
@@ -785,7 +785,7 @@ export default function TradingSimulator() {
     })
   }
 
-  const handleMouseMove = (e: MouseEvent) => {
+  const handleMouseMove = useCallback((e: MouseEvent) => {
     if (isDragging) {
       const newX = Math.max(10, Math.min(window.innerWidth - 170, e.clientX - dragStart.x))
       const newY = Math.max(10, Math.min(window.innerHeight - 70, e.clientY - dragStart.y))
@@ -798,9 +798,9 @@ export default function TradingSimulator() {
       
       setButtonPosition({ x: newX, y: newY })
     }
-  }
+  }, [isDragging, dragStart.x, dragStart.y, buttonPosition.x, buttonPosition.y])
 
-  const handleTouchMove = (e: TouchEvent) => {
+  const handleTouchMove = useCallback((e: TouchEvent) => {
     if (isDragging) {
       e.preventDefault()
       const touch = e.touches[0]
@@ -815,9 +815,9 @@ export default function TradingSimulator() {
       
       setButtonPosition({ x: newX, y: newY })
     }
-  }
+  }, [isDragging, dragStart.x, dragStart.y, buttonPosition.x, buttonPosition.y])
 
-  const handleDragEnd = () => {
+  const handleDragEnd = useCallback(() => {
     if (isDragging) {
       setIsDragging(false)
       // Pozisyonu localStorage'a kaydet
@@ -826,7 +826,7 @@ export default function TradingSimulator() {
       // Kısa süre sonra hasMoved'i sıfırla
       setTimeout(() => setHasMoved(false), 100)
     }
-  }
+  }, [isDragging, buttonPosition])
 
   // Aktif trade varsa onun sembolüne WebSocket bağla
   useEffect(() => {
@@ -1917,7 +1917,7 @@ export default function TradingSimulator() {
                           // Method 1: dom-to-image
                           console.log('Paylaşım için dom-to-image deneniyor...')
                           try {
-                            dataUrl = await (domtoimage as { toPng: (element: Element, options: any) => Promise<string> }).toPng(element, {
+                            dataUrl = await (domtoimage as { toPng: (element: Element, options: { quality: number; bgcolor: string; width: number; height: number }) => Promise<string> }).toPng(element, {
                               quality: 1.0,
                               bgcolor: '#1f2937',
                               width: element.offsetWidth,
