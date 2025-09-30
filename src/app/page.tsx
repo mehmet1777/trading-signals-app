@@ -501,7 +501,7 @@ export default function TradingSimulator() {
         }, 5000)
       }
     }, 100)
-  }, [handleLiquidation])
+  }, [])
 
   // Trading çifti değiştiğinde WebSocket'i yeniden bağla ve fiyatı güncelle
   useEffect(() => {
