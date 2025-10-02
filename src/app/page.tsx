@@ -12,6 +12,7 @@ interface TradingPair {
 }
 
 interface TradeData {
+  id: string
   symbol: string
   type: 'long' | 'short'
   entryPrice: number
@@ -41,6 +42,16 @@ interface TradeHistory {
   status: 'completed' | 'liquidated'
 }
 
+interface PendingOrder {
+  id: string
+  symbol: string
+  type: 'long' | 'short'
+  targetPrice: number
+  leverage: number
+  investment: number
+  createdAt: Date
+}
+
 interface TradeStats {
   totalTrades: number
   winningTrades: number
@@ -59,19 +70,18 @@ export default function TradingSimulator() {
   const [tradingPairs, setTradingPairs] = useState<TradingPair[]>([])
   const [selectedPair, setSelectedPair] = useState<string>('BTCUSDT')
   const [currentPrice, setCurrentPrice] = useState<number>(0)
+  const [manualPrice, setManualPrice] = useState<number | null>(null)
   const [tradeType, setTradeType] = useState<'long' | 'short'>('long')
   const [leverage, setLeverage] = useState<number>(10)
   const [investment, setInvestment] = useState<number>(100)
   const [investmentInput, setInvestmentInput] = useState<string>('100')
-  const [activeTradeData, setActiveTradeData] = useState<TradeData | null>(null)
+  const [activeTrades, setActiveTrades] = useState<TradeData[]>([])
+  const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([])
+  const [selectedTradeId, setSelectedTradeId] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [isPairSwitching, setIsPairSwitching] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
   const [wsConnectionStatus, setWsConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('disconnected')
-  const [buttonPosition, setButtonPosition] = useState({ x: typeof window !== 'undefined' ? window.innerWidth - 120 : 300, y: typeof window !== 'undefined' ? window.innerHeight - 120 : 500 })
-  const [isDragging, setIsDragging] = useState(false)
-  const [dragStart, setDragStart] = useState({ x: 0, y: 0 })
-  const [hasMoved, setHasMoved] = useState(false)
   const [showLiquidationModal, setShowLiquidationModal] = useState(false)
   const [liquidationData, setLiquidationData] = useState<{loss: number, price: number} | null>(null)
   const [showShareModal, setShowShareModal] = useState(false)
@@ -102,25 +112,38 @@ export default function TradingSimulator() {
   // Mevcut maksimum kaldıraç
   const maxLeverage = getMaxLeverage(investment)
 
-  // localStorage'dan aktif trade'i geri yükle
+  // localStorage'dan aktif trade'leri geri yükle
   useEffect(() => {
     try {
-      const savedTrade = localStorage.getItem('activeTrade')
-      if (savedTrade) {
-        const tradeData = JSON.parse(savedTrade)
-        // Date objesini yeniden oluştur
-        tradeData.startTime = new Date(tradeData.startTime)
-        // Sadece aktif trade'leri yükle
-        if (tradeData.isActive) {
-          setActiveTradeData(tradeData)
-          setSelectedPair(tradeData.symbol)
-          setLeverage(tradeData.leverage)
-          setInvestment(tradeData.investment)
-          setInvestmentInput(tradeData.investment.toString())
-          setTradeType(tradeData.type)
-          console.log('💾 Kaydedilmiş trade geri yüklendi:', tradeData)
-        } else {
-          localStorage.removeItem('activeTrade')
+      // Yeni çoklu trade sistemi
+      const savedTrades = localStorage.getItem('activeTrades')
+      if (savedTrades) {
+        const tradesData = JSON.parse(savedTrades)
+        const activeTrades = tradesData
+          .filter((trade: any) => trade.isActive)
+          .map((trade: any) => ({
+            ...trade,
+            startTime: new Date(trade.startTime)
+          }))
+        
+        if (activeTrades.length > 0) {
+          setActiveTrades(activeTrades)
+          console.log('💾 Kaydedilmiş trade\'ler geri yüklendi:', activeTrades.length)
+        }
+      } else {
+        // Eski tek trade sisteminden geçiş
+        const savedTrade = localStorage.getItem('activeTrade')
+        if (savedTrade) {
+          const tradeData = JSON.parse(savedTrade)
+          tradeData.startTime = new Date(tradeData.startTime)
+          if (tradeData.isActive) {
+            // Eski trade'e ID ekle
+            tradeData.id = `trade_${Date.now()}_legacy`
+            setActiveTrades([tradeData])
+            console.log('💾 Eski trade sistemi güncellendi:', tradeData)
+            // Eski localStorage'u temizle
+            localStorage.removeItem('activeTrade')
+          }
         }
       }
 
@@ -143,18 +166,22 @@ export default function TradingSimulator() {
         console.log('💾 Kullanıcı adı geri yüklendi:', savedUsername)
       }
 
-      // Kayıtlı buton pozisyonunu yükle
-      const savedPosition = localStorage.getItem('floatingButtonPosition')
-      if (savedPosition) {
-        const parsed = JSON.parse(savedPosition)
-        setButtonPosition(parsed)
-        console.log('💾 Buton pozisyonu geri yüklendi:', parsed)
+      // Bekleyen emirleri yükle
+      const savedPendingOrders = localStorage.getItem('pendingOrders')
+      if (savedPendingOrders) {
+        const ordersData = JSON.parse(savedPendingOrders)
+        const orders = ordersData.map((order: any) => ({
+          ...order,
+          createdAt: new Date(order.createdAt)
+        }))
+        setPendingOrders(orders)
+        console.log('💾 Bekleyen emirler geri yüklendi:', orders.length, 'emir')
       }
+
     } catch (error) {
       console.error('Trade/pozisyon geri yükleme hatası:', error)
       localStorage.removeItem('activeTrade')
       localStorage.removeItem('tradeHistory')
-      localStorage.removeItem('floatingButtonPosition')
     }
   }, [])
 
@@ -294,6 +321,7 @@ export default function TradingSimulator() {
     }
   }, [showShareModal])
   const wsRef = useRef<WebSocket | null>(null)
+  const multiWsRefs = useRef<Map<string, WebSocket>>(new Map())
   const priceUpdateRef = useRef<HTMLDivElement>(null)
   const activeTradeRef = useRef<HTMLDivElement>(null)
 
@@ -327,7 +355,368 @@ export default function TradingSimulator() {
     fetchTradingPairs()
   }, [])
 
-  // WebSocket bağlantısı
+  // Seçili sembol için WebSocket bağlantısı
+  const connectSelectedPairWebSocket = useCallback((symbol: string) => {
+    // Önce mevcut bağlantıları kapat
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+    
+    try {
+      const wsUrl = `wss://stream.binance.com:9443/ws/${symbol.toLowerCase()}@trade`
+      console.log(`Seçili sembol WebSocket bağlantısı kuruluyor: ${symbol}`)
+      
+      wsRef.current = new WebSocket(wsUrl);
+      
+      wsRef.current.onopen = () => {
+        console.log(`✅ [SelectedWS] Bağlandı: ${symbol}`);
+        setWsConnectionStatus('connected');
+      };
+      
+      wsRef.current.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.p) {
+            const newPrice = parseFloat(data.p);
+            console.log(`📊 [SelectedWS] ${symbol} → Fiyat: $${newPrice.toFixed(2)}`);
+            
+            // Bekleyen emirleri kontrol et
+            checkPendingOrders(symbol, newPrice);
+            
+            // Sadece seçili sembolün fiyatını güncelle
+            setCurrentPrice(prevPrice => {
+              // Fiyat animasyonu
+              if (priceUpdateRef.current) {
+                const element = priceUpdateRef.current;
+                if (newPrice > prevPrice) {
+                  element.classList.remove('price-down');
+                  element.classList.add('price-up');
+                } else if (newPrice < prevPrice) {
+                  element.classList.remove('price-up');
+                  element.classList.add('price-down');
+                }
+                
+                setTimeout(() => {
+                  element.classList.remove('price-up', 'price-down');
+                }, 500);
+              }
+              
+              return newPrice;
+            });
+            
+            // Aktif trade'leri güncelle
+            setActiveTrades(prevTrades => {
+              console.log(`🔄 [SelectedWS] activeTrades kontrol: ${prevTrades.length} trade, ${symbol} için fiyat: ${newPrice}`);
+              let hasUpdated = false;
+              const updatedTrades = prevTrades.map(trade => {
+                if (trade.symbol === symbol && trade.isActive) {
+                  console.log(`💰 [SelectedWS] Trade güncelleniyor: ${symbol} - Fiyat: ${newPrice} - Giriş: ${trade.entryPrice} - Trade ID: ${trade.id}`);
+                  
+                  // Liquidation kontrolü
+                  if (checkLiquidation(newPrice, trade)) {
+                    console.log(`LİKİDASYON! Fiyat: ${newPrice}, Liq Fiyatı: ${trade.liquidationPrice.toFixed(2)} - Trade ID: ${trade.id}`);
+                    handleLiquidation(trade, newPrice);
+                    return null; // Bu trade'i listeden çıkar
+                  }
+                  
+                  const positionSize = (trade.leverage * trade.investment) / trade.entryPrice;
+                  let pnl = 0;
+                  
+                  if (trade.type === 'long') {
+                    pnl = (newPrice - trade.entryPrice) * positionSize;
+                  } else {
+                    pnl = (trade.entryPrice - newPrice) * positionSize;
+                  }
+                  
+                  const roi = (pnl / trade.investment) * 100;
+                  
+                  const updatedTrade = {
+                    ...trade,
+                    currentPrice: newPrice,
+                    pnl,
+                    roi
+                  };
+                  
+                  console.log(`Yeni PnL: ${pnl.toFixed(2)} - ROI: ${roi.toFixed(2)}% - Trade ID: ${trade.id}`);
+                  hasUpdated = true;
+                  return updatedTrade;
+                }
+                return trade;
+              }).filter(trade => trade !== null); // Likidite olanları çıkar
+              
+              // Sadece gerçekten güncelleme yapıldıysa localStorage'ı güncelle
+              if (hasUpdated) {
+                if (updatedTrades.length > 0) {
+                  localStorage.setItem('activeTrades', JSON.stringify(updatedTrades));
+                } else {
+                  localStorage.removeItem('activeTrades');
+                }
+              }
+              
+              return updatedTrades as TradeData[];
+            });
+          }
+        } catch (parseError) {
+          console.error('WebSocket mesaj ayrıştırma hatası:', parseError);
+        }
+      };
+      
+      wsRef.current.onerror = (error) => {
+        console.error(`WebSocket hatası (${symbol}):`, error);
+        setWsConnectionStatus('error');
+      };
+      
+      wsRef.current.onclose = (event) => {
+        console.log(`WebSocket bağlantısı kapandı (${symbol}):`, event.code);
+        setWsConnectionStatus('disconnected');
+        // Beklenmeyen kapanma durumunda yeniden bağlan
+        if (!event.wasClean && event.code === 1006) {
+          setTimeout(() => {
+            connectSelectedPairWebSocket(symbol);
+          }, 2000);
+        }
+      };
+    } catch (connectionError) {
+      console.error(`WebSocket bağlantı kurma hatası (${symbol}):`, connectionError);
+      setWsConnectionStatus('error');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  
+  // Aktif trade'ler için çoklu WebSocket bağlantı yönetimi
+  const connectMultiWebSockets = useCallback((symbols: string[]) => {
+    console.log('🔄 [MultiWS] Yönetim başlatılıyor. Mevcut:', Array.from(multiWsRefs.current.keys()), 'Hedef:', symbols);
+    
+    // Artık aktif olmayan symbol'lerin WebSocket'lerini kapat
+    multiWsRefs.current.forEach((ws, symbol) => {
+      if (!symbols.includes(symbol)) {
+        console.log(`❌ [MultiWS] Kapatılıyor: ${symbol}`);
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close();
+        }
+        multiWsRefs.current.delete(symbol);
+      }
+    });
+
+    // Yeni symbol'ler için WebSocket bağlantısı kur (mevcut olanlara dokunma!)
+    symbols.forEach(symbol => {
+      if (!symbol) return;
+      
+      // Eğer bu symbol için zaten bir WebSocket varsa, atla
+      if (multiWsRefs.current.has(symbol)) {
+        const existingWs = multiWsRefs.current.get(symbol);
+        if (existingWs && (existingWs.readyState === WebSocket.OPEN || existingWs.readyState === WebSocket.CONNECTING)) {
+          console.log(`⏭️  [MultiWS] Zaten bağlı: ${symbol}`);
+          return;
+        }
+        // Eğer bağlantı kapanmışsa, sil ve yeniden bağlan
+        multiWsRefs.current.delete(symbol);
+      }
+      
+      try {
+        const wsUrl = `wss://stream.binance.com:9443/ws/${symbol.toLowerCase()}@trade`;
+        console.log(`🔵 [MultiWS] Bağlantı kuruluyor: ${symbol}`);
+        
+        const ws = new WebSocket(wsUrl);
+        multiWsRefs.current.set(symbol, ws);
+
+        ws.onopen = () => {
+          console.log(`✅ [MultiWS] Bağlandı: ${symbol}`);
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.p) {
+              const newPrice = parseFloat(data.p);
+              console.log(`📊 [MultiWS] ${symbol} → Fiyat: $${newPrice.toFixed(2)}`);
+              
+              // Bekleyen emirleri kontrol et
+              checkPendingOrders(symbol, newPrice);
+              
+              // Bu symbol'e ait tüm trade'leri güncelle
+              setActiveTrades(prevTrades => {
+                console.log(`🔄 [MultiWS] activeTrades kontrol: ${prevTrades.length} trade, ${symbol} için fiyat: ${newPrice}`);
+                let hasUpdated = false;
+                const updatedTrades = prevTrades.map(trade => {
+                  if (trade.symbol === symbol && trade.isActive) {
+                    console.log(`💰 [MultiWS] Trade güncelleniyor: ${symbol} - Fiyat: ${newPrice} - Giriş: ${trade.entryPrice} - Trade ID: ${trade.id}`);
+                    
+                    // Liquidation kontrolü
+                    if (checkLiquidation(newPrice, trade)) {
+                      console.log(`LİKİDASYON! Fiyat: ${newPrice}, Liq Fiyatı: ${trade.liquidationPrice.toFixed(2)} - Trade ID: ${trade.id}`);
+                      handleLiquidation(trade, newPrice);
+                      return null; // Bu trade'i listeden çıkar
+                    }
+                    
+                    const positionSize = (trade.leverage * trade.investment) / trade.entryPrice;
+                    let pnl = 0;
+                    
+                    if (trade.type === 'long') {
+                      pnl = (newPrice - trade.entryPrice) * positionSize;
+                    } else {
+                      pnl = (trade.entryPrice - newPrice) * positionSize;
+                    }
+                    
+                    const roi = (pnl / trade.investment) * 100;
+                    
+                    const updatedTrade = {
+                      ...trade,
+                      currentPrice: newPrice,
+                      pnl,
+                      roi
+                    };
+                    
+                    console.log(`Yeni PnL: ${pnl.toFixed(2)} - ROI: ${roi.toFixed(2)}% - Trade ID: ${trade.id}`);
+                    hasUpdated = true;
+                    return updatedTrade;
+                  }
+                  return trade;
+                }).filter(trade => trade !== null); // Likidite olanları çıkar
+                
+                // Sadece gerçekten güncelleme yapıldıysa localStorage'ı güncelle
+                if (hasUpdated) {
+                  if (updatedTrades.length > 0) {
+                    localStorage.setItem('activeTrades', JSON.stringify(updatedTrades));
+                  } else {
+                    localStorage.removeItem('activeTrades');
+                  }
+                }
+                
+                return updatedTrades as TradeData[];
+              });
+            }
+          } catch (parseError) {
+            console.error('WebSocket mesaj ayrıştırma hatası:', parseError);
+          }
+        };
+
+        ws.onerror = (error) => {
+          console.error(`WebSocket hatası (${symbol}):`, error);
+        };
+
+        ws.onclose = (event) => {
+          console.log(`WebSocket bağlantısı kapandı (${symbol}):`, event.code);
+          // Beklenmeyen kapanma durumunda yeniden bağlan
+          if (!event.wasClean && event.code === 1006) {
+            setTimeout(() => {
+              if (symbols.includes(symbol)) {
+                connectMultiWebSockets([symbol]);
+              }
+            }, 2000);
+          }
+        };
+      } catch (connectionError) {
+        console.error(`WebSocket bağlantı kurma hatası (${symbol}):`, connectionError);
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Fallback fiyat güncelleme - 5 saniyede bir REST API ile fiyat çek
+  const fallbackPriceUpdate = useCallback(() => {
+    // Tüm aktif trade'lerin sembollerini al
+    const activeSymbols = [...new Set(activeTrades.filter(t => t.isActive).map(t => t.symbol))];
+    
+    // Seçili sembolü de ekle (eğer zaten listede değilse)
+    if (!activeSymbols.includes(selectedPair)) {
+      activeSymbols.push(selectedPair);
+    }
+    
+    console.log('Fallback fiyat güncelleme için semboller:', activeSymbols);
+    
+    // Her sembol için fiyat güncelle
+    activeSymbols.forEach(async (symbol) => {
+      try {
+        const response = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
+        const data = await response.json();
+        const newPrice = parseFloat(data.price);
+        
+        if (!isNaN(newPrice)) {
+          console.log(`Fallback fiyat güncelleme: ${symbol} - ${newPrice}`);
+          
+          // Eğer bu sembol seçili sembolse, anlık fiyatı da güncelle
+          if (symbol === selectedPair) {
+            setCurrentPrice(prevPrice => {
+              // Fiyat animasyonu
+              if (priceUpdateRef.current) {
+                const element = priceUpdateRef.current;
+                if (newPrice > prevPrice) {
+                  element.classList.remove('price-down');
+                  element.classList.add('price-up');
+                } else if (newPrice < prevPrice) {
+                  element.classList.remove('price-up');
+                  element.classList.add('price-down');
+                }
+                
+                setTimeout(() => {
+                  element.classList.remove('price-up', 'price-down');
+                }, 500);
+              }
+              
+              return newPrice;
+            });
+          }
+          
+          // Bu sembole ait tüm aktif trade'leri güncelle
+          setActiveTrades(prevTrades => {
+            let hasUpdated = false;
+            const updatedTrades = prevTrades.map(trade => {
+              if (trade.symbol === symbol && trade.isActive) {
+                console.log(`Fallback ile trade güncelleniyor: ${symbol} - Fiyat: ${newPrice} - Trade ID: ${trade.id}`);
+                
+                // Liquidation kontrolü
+                if (checkLiquidation(newPrice, trade)) {
+                  console.log(`LİKİDASYON (Fallback): Fiyat: ${newPrice}, Liq Fiyatı: ${trade.liquidationPrice.toFixed(2)} - Trade ID: ${trade.id}`);
+                  handleLiquidation(trade, newPrice);
+                  return null;
+                }
+                
+                const positionSize = (trade.leverage * trade.investment) / trade.entryPrice;
+                let pnl = 0;
+                
+                if (trade.type === 'long') {
+                  pnl = (newPrice - trade.entryPrice) * positionSize;
+                } else {
+                  pnl = (trade.entryPrice - newPrice) * positionSize;
+                }
+                
+                const roi = (pnl / trade.investment) * 100;
+                
+                const updatedTrade = {
+                  ...trade,
+                  currentPrice: newPrice,
+                  pnl,
+                  roi
+                };
+                
+                console.log(`Fallback ile yeni PnL: ${pnl.toFixed(2)} - ROI: ${roi.toFixed(2)}% - Trade ID: ${trade.id}`);
+                hasUpdated = true;
+                return updatedTrade;
+              }
+              return trade;
+            }).filter(trade => trade !== null);
+            
+            // Sadece gerçekten güncelleme yapıldıysa localStorage'ı güncelle
+            if (hasUpdated) {
+              if (updatedTrades.length > 0) {
+                localStorage.setItem('activeTrades', JSON.stringify(updatedTrades));
+              } else {
+                localStorage.removeItem('activeTrades');
+              }
+            }
+            
+            return updatedTrades as TradeData[];
+          });
+        }
+      } catch (error) {
+        console.error(`Fallback fiyat güncelleme hatası (${symbol}):`, error);
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTrades, selectedPair]);
+
+  // WebSocket bağlantısı (eski sistem - geriye uyumluluk için)
   const connectWebSocket = useCallback((symbol: string) => {
     if (wsRef.current) {
       wsRef.current.close()
@@ -397,46 +786,52 @@ export default function TradingSimulator() {
               return newPrice
             })
             
-            // Aktif trade varsa PnL güncelle ve liquidation kontrol et
-            setActiveTradeData(prevTrade => {
-              if (prevTrade && prevTrade.isActive && prevTrade.symbol.toLowerCase() === symbol.toLowerCase()) {
-                console.log(`PnL güncelleniyor: ${symbol} - Fiyat: ${newPrice} - Giriş: ${prevTrade.entryPrice}`)
-                
-                // Liquidation kontrolü
-                if (checkLiquidation(newPrice, prevTrade)) {
-                  console.log(`LİKİDASYON! Fiyat: ${newPrice}, Liq Fiyatı: ${prevTrade.liquidationPrice.toFixed(2)}`)
-                  handleLiquidation(prevTrade, newPrice)
-                  return prevTrade // Trade handleLiquidation içinde kapatılacak
+            // Aktif trade'ler varsa PnL güncelle ve liquidation kontrol et
+            setActiveTrades(prevTrades => {
+              const updatedTrades = prevTrades.map(trade => {
+                if (trade.isActive && trade.symbol.toLowerCase() === symbol.toLowerCase()) {
+                  console.log(`PnL güncelleniyor: ${symbol} - Fiyat: ${newPrice} - Giriş: ${trade.entryPrice} - Trade ID: ${trade.id}`)
+                  
+                  // Liquidation kontrolü
+                  if (checkLiquidation(newPrice, trade)) {
+                    console.log(`LİKİDASYON! Fiyat: ${newPrice}, Liq Fiyatı: ${trade.liquidationPrice.toFixed(2)} - Trade ID: ${trade.id}`)
+                    handleLiquidation(trade, newPrice)
+                    return null // Bu trade'i listeden çıkar
+                  }
+                  
+                  const positionSize = (trade.leverage * trade.investment) / trade.entryPrice
+                  let pnl = 0
+                  
+                  if (trade.type === 'long') {
+                    pnl = (newPrice - trade.entryPrice) * positionSize
+                  } else {
+                    pnl = (trade.entryPrice - newPrice) * positionSize
+                  }
+                  
+                  const roi = (pnl / trade.investment) * 100
+                  
+                  const updatedTrade = {
+                    ...trade,
+                    currentPrice: newPrice,
+                    pnl,
+                    roi
+                  }
+                  
+                  console.log(`Yeni PnL: ${pnl.toFixed(2)} - ROI: ${roi.toFixed(2)}% - Trade ID: ${trade.id}`)
+                  
+                  return updatedTrade
                 }
-                
-                const positionSize = (prevTrade.leverage * prevTrade.investment) / prevTrade.entryPrice
-                let pnl = 0
-                
-                if (prevTrade.type === 'long') {
-                  pnl = (newPrice - prevTrade.entryPrice) * positionSize
-                } else {
-                  pnl = (prevTrade.entryPrice - newPrice) * positionSize
-                }
-                
-                const roi = (pnl / prevTrade.investment) * 100
-                
-                const updatedTrade = {
-                  ...prevTrade,
-                  currentPrice: newPrice,
-                  pnl,
-                  roi
-                }
-                
-                console.log(`Yeni PnL: ${pnl.toFixed(2)} - ROI: ${roi.toFixed(2)}%`)
-                
-                // LocalStorage'ı da güncelle
-                localStorage.setItem('activeTrade', JSON.stringify(updatedTrade))
-                
-                return updatedTrade
-              } else if (prevTrade) {
-                console.log(`PnL güncellenmediği sebep - Trade symbol: ${prevTrade.symbol}, WebSocket symbol: ${symbol}, Active: ${prevTrade.isActive}`)
+                return trade
+              }).filter(trade => trade !== null) // Likidite olanları çıkar
+              
+              // Güncellenmiş trade'leri localStorage'a kaydet
+              if (updatedTrades.length > 0) {
+                localStorage.setItem('activeTrades', JSON.stringify(updatedTrades))
+              } else {
+                localStorage.removeItem('activeTrades')
               }
-              return prevTrade
+              
+              return updatedTrades
             })
           } catch (parseError) {
             console.error('WebSocket mesaj ayrıştırma hatası:', parseError)
@@ -501,6 +896,7 @@ export default function TradingSimulator() {
         }, 5000)
       }
     }, 100)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Trading çifti değiştiğinde WebSocket'i yeniden bağla ve fiyatı güncelle
@@ -519,15 +915,20 @@ export default function TradingSimulator() {
         })
       }
       
-      // WebSocket bağlantısını kur
-      connectWebSocket(selectedPair)
+      // Seçili sembol için WebSocket bağlantısı kur
+      connectSelectedPairWebSocket(selectedPair);
+      
+      // Coin değiştiğinde manuel fiyatı sıfırla
+      setManualPrice(null);
     }
+    
+    // Temizlik fonksiyonu
     return () => {
       if (wsRef.current) {
-        wsRef.current.close()
+        wsRef.current.close();
       }
-    }
-  }, [selectedPair, tradingPairs, connectWebSocket])
+    };
+  }, [selectedPair, tradingPairs, connectSelectedPairWebSocket])
 
   // Liquidation price hesaplama
   const calculateLiquidationPrice = (entryPrice: number, leverage: number, type: 'long' | 'short') => {
@@ -544,15 +945,84 @@ export default function TradingSimulator() {
     }
   }
 
+  // Bekleyen emirleri kontrol et ve aktifleştir
+  const checkPendingOrders = useCallback((symbol: string, currentPrice: number) => {
+    setPendingOrders(prevOrders => {
+      const ordersToActivate: PendingOrder[] = []
+      const remainingOrders: PendingOrder[] = []
+      
+      prevOrders.forEach(order => {
+        if (order.symbol !== symbol) {
+          remainingOrders.push(order)
+          return
+        }
+        
+        // Long emirler için: Fiyat hedefe düştüyse aktifleştir
+        // Short emirler için: Fiyat hedefe yükseldiyse aktifleştir
+        const shouldActivate = 
+          (order.type === 'long' && currentPrice <= order.targetPrice) ||
+          (order.type === 'short' && currentPrice >= order.targetPrice)
+        
+        if (shouldActivate) {
+          // Aktif trade limiti kontrolü
+          if (activeTrades.length < 5) {
+            ordersToActivate.push(order)
+            console.log(`🎯 Bekleyen emir tetiklendi! ${order.symbol} ${order.type} @ $${currentPrice} (Hedef: $${order.targetPrice})`)
+          } else {
+            // Limit doluysa emri beklet
+            remainingOrders.push(order)
+            console.log(`⚠️ Emir tetiklendi ama aktif trade limiti dolu: ${order.symbol}`)
+          }
+        } else {
+          remainingOrders.push(order)
+        }
+      })
+      
+      // Tetiklenen emirleri trade'e çevir
+      if (ordersToActivate.length > 0) {
+        ordersToActivate.forEach(order => {
+          const liquidationPrice = calculateLiquidationPrice(order.targetPrice, order.leverage, order.type)
+          
+          const newTrade: TradeData = {
+            id: `trade_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            symbol: order.symbol,
+            type: order.type,
+            entryPrice: order.targetPrice,
+            leverage: order.leverage,
+            investment: order.investment,
+            currentPrice: currentPrice,
+            pnl: 0,
+            roi: 0,
+            liquidationPrice,
+            isActive: true,
+            startTime: new Date()
+          }
+          
+          setActiveTrades(prev => {
+            const updated = [...prev, newTrade]
+            localStorage.setItem('activeTrades', JSON.stringify(updated))
+            return updated
+          })
+          
+          console.log(`✅ Emir trade'e dönüştürüldü: ${newTrade.symbol} - ${newTrade.type} @ $${newTrade.entryPrice}`)
+        })
+      }
+      
+      // Güncellenen bekleyen emirleri kaydet
+      localStorage.setItem('pendingOrders', JSON.stringify(remainingOrders))
+      return remainingOrders
+    })
+  }, [activeTrades.length])
+
   // Liquidation kontrolü
-  const checkLiquidation = (currentPrice: number, tradeData: TradeData) => {
+  const checkLiquidation = useCallback((currentPrice: number, tradeData: TradeData) => {
     if (tradeData.type === 'long' && currentPrice <= tradeData.liquidationPrice) {
       return true
     } else if (tradeData.type === 'short' && currentPrice >= tradeData.liquidationPrice) {
       return true
     }
     return false
-  }
+  }, [])
 
   // Liquidation işlemi
   const handleLiquidation = useCallback((tradeData: TradeData, currentPrice: number) => {
@@ -575,28 +1045,61 @@ export default function TradingSimulator() {
     setShowLiquidationModal(true)
     
     // Trade'i kapat
-    setTimeout(() => {
-      setActiveTradeData(null)
-      localStorage.removeItem('activeTrade')
-    }, 100)
+    // Artık çoklu trade sisteminde kullanılmıyor
   }, [])
 
   // Trade başlat
   const startTrade = () => {
-    if (currentPrice === 0) return
+    // Kullanılacak fiyatı belirle: manuel fiyat varsa onu, yoksa anlık fiyatı kullan
+    const tradePrice = manualPrice !== null ? manualPrice : currentPrice;
+    
+    if (tradePrice === 0) return
+    
+    // Maksimum limit kontrolü: Aktif trade + Bekleyen emir = 5
+    const totalPositions = activeTrades.length + pendingOrders.length
+    if (totalPositions >= 5) {
+      alert(`Maksimum 5 pozisyon (aktif + bekleyen) açabilirsiniz.\nAktif: ${activeTrades.length}, Bekleyen: ${pendingOrders.length}`)
+      return
+    }
+    
+    // Manuel fiyat varsa ve mevcut fiyattan farklıysa bekleyen emire ekle
+    if (manualPrice !== null && Math.abs(manualPrice - currentPrice) > 0.01) {
+      const newOrder: PendingOrder = {
+        id: `order_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        symbol: selectedPair,
+        type: tradeType,
+        targetPrice: manualPrice,
+        leverage,
+        investment,
+        createdAt: new Date()
+      }
+      
+      console.log(`📝 Bekleyen emir oluşturuldu: ${newOrder.symbol} - ${newOrder.type} - Hedef: $${newOrder.targetPrice}`)
+      
+      setPendingOrders(prev => {
+        const updated = [...prev, newOrder]
+        localStorage.setItem('pendingOrders', JSON.stringify(updated))
+        return updated
+      })
+      
+      alert(`✅ Bekleyen emir oluşturuldu!\n${selectedPair} ${tradeType.toUpperCase()}\nHedef Fiyat: $${manualPrice.toFixed(2)}\nMevcut: $${currentPrice.toFixed(2)}`)
+      setManualPrice(null)
+      return
+    }
     
     setIsLoading(true)
     
     setTimeout(() => {
-      const liquidationPrice = calculateLiquidationPrice(currentPrice, leverage, tradeType)
+      const liquidationPrice = calculateLiquidationPrice(tradePrice, leverage, tradeType)
       
       const newTrade: TradeData = {
+        id: `trade_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         symbol: selectedPair,
         type: tradeType,
-        entryPrice: currentPrice,
+        entryPrice: tradePrice,
         leverage,
         investment,
-        currentPrice,
+        currentPrice: tradePrice,
         pnl: 0,
         roi: 0,
         liquidationPrice,
@@ -606,16 +1109,20 @@ export default function TradingSimulator() {
       
       console.log(`Trade başlatıldı: ${newTrade.symbol} - Tip: ${newTrade.type} - Giriş: ${newTrade.entryPrice}`)
       
-      setActiveTradeData(newTrade)
-      localStorage.setItem('activeTrade', JSON.stringify(newTrade))
+      // Yeni trade'i activeTrades array'ine ekle
+      setActiveTrades(prev => [...prev, newTrade])
       
-      // Trade başlatıldığında doğru sembol için WebSocket bağlantısını kontrol et
+      // localStorage'a tüm aktif trade'leri kaydet
+      const updatedTrades = [...activeTrades, newTrade]
+      localStorage.setItem('activeTrades', JSON.stringify(updatedTrades))
+      
+      // Trade başlatıldığında doğru sembol için seçili pair'i güncelle
       if (selectedPair !== newTrade.symbol) {
         setSelectedPair(newTrade.symbol)
-      } else {
-        // Aynı sembol ise WebSocket'ı yeniden bağla (trade bilgilerini alır)
-        connectWebSocket(newTrade.symbol)
       }
+      
+      // Manuel fiyatı sıfırla
+      setManualPrice(null);
       
       setIsLoading(false)
       
@@ -659,20 +1166,49 @@ export default function TradingSimulator() {
       return newHistory
     })
   }
-  const closeTrade = () => {
-    if (!activeTradeData) return
+  
+  // Bekleyen emri iptal et
+  const cancelPendingOrder = (orderId: string) => {
+    setPendingOrders(prev => {
+      const updated = prev.filter(order => order.id !== orderId)
+      localStorage.setItem('pendingOrders', JSON.stringify(updated))
+      console.log(`🗑️ Bekleyen emir iptal edildi: ${orderId}`)
+      return updated
+    })
+  }
+  
+  const closeTrade = (tradeId?: string) => {
+    if (activeTrades.length === 0) return
+    
+    // Eğer ID verilmemişse, ilk aktif trade'i kapat
+    const targetTradeId = tradeId || (activeTrades.length > 0 ? activeTrades[0].id : null)
+    const targetTrade = activeTrades.find(trade => trade.id === targetTradeId)
+    
+    if (!targetTrade) return
     
     setIsLoading(true)
     
     setTimeout(() => {
       // Trade'i geçmişe kaydet
-      saveTradeToHistory(activeTradeData, 'completed')
+      saveTradeToHistory(targetTrade, 'completed')
       
-      setActiveTradeData(null)
-      localStorage.removeItem('activeTrade')
+      // Belirtilen trade'i aktif listeden çıkar
+      setActiveTrades(prev => {
+        const updatedTrades = prev.filter(trade => trade.id !== targetTradeId)
+        
+        // localStorage'ı güncelle
+        if (updatedTrades.length > 0) {
+          localStorage.setItem('activeTrades', JSON.stringify(updatedTrades))
+        } else {
+          localStorage.removeItem('activeTrades')
+        }
+        
+        return updatedTrades
+      })
+      
       setIsLoading(false)
       
-      console.log('Trade kapatıldı ve geçmişe kaydedildi')
+      console.log(`Trade kapatıldı ve geçmişe kaydedildi - ID: ${targetTradeId}`)
     }, 500)
   }
 
@@ -762,132 +1298,53 @@ export default function TradingSimulator() {
   }, [tradeHistory, statsFilter])
 
   const currentStats = calculateStats()
-  const handleMouseDown = (e: React.MouseEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    setIsDragging(true)
-    setHasMoved(false)
-    setDragStart({
-      x: e.clientX - buttonPosition.x,
-      y: e.clientY - buttonPosition.y
-    })
-  }
+  
+  // Seçili trade'i hesapla
+  const selectedTrade = useMemo(() => {
+    if (!selectedTradeId || activeTrades.length === 0) return activeTrades[0]
+    return activeTrades.find(t => t.id === selectedTradeId) || activeTrades[0]
+  }, [selectedTradeId, activeTrades])
 
-  const handleTouchStart = (e: React.TouchEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    setIsDragging(true)
-    setHasMoved(false)
-    const touch = e.touches[0]
-    setDragStart({
-      x: touch.clientX - buttonPosition.x,
-      y: touch.clientY - buttonPosition.y
-    })
-  }
 
-  const handleMouseMove = useCallback((e: MouseEvent) => {
-    if (isDragging) {
-      const newX = Math.max(10, Math.min(window.innerWidth - 170, e.clientX - dragStart.x))
-      const newY = Math.max(10, Math.min(window.innerHeight - 70, e.clientY - dragStart.y))
-      
-      // Hareket mesafesini kontrol et
-      const moveDistance = Math.abs(newX - buttonPosition.x) + Math.abs(newY - buttonPosition.y)
-      if (moveDistance > 3) {
-        setHasMoved(true)
-      }
-      
-      setButtonPosition({ x: newX, y: newY })
-    }
-  }, [isDragging, dragStart.x, dragStart.y, buttonPosition.x, buttonPosition.y])
 
-  const handleTouchMove = useCallback((e: TouchEvent) => {
-    if (isDragging) {
-      e.preventDefault()
-      const touch = e.touches[0]
-      const newX = Math.max(10, Math.min(window.innerWidth - 170, touch.clientX - dragStart.x))
-      const newY = Math.max(10, Math.min(window.innerHeight - 70, touch.clientY - dragStart.y))
-      
-      // Hareket mesafesini kontrol et
-      const moveDistance = Math.abs(newX - buttonPosition.x) + Math.abs(newY - buttonPosition.y)
-      if (moveDistance > 3) {
-        setHasMoved(true)
-      }
-      
-      setButtonPosition({ x: newX, y: newY })
-    }
-  }, [isDragging, dragStart.x, dragStart.y, buttonPosition.x, buttonPosition.y])
-
-  const handleDragEnd = useCallback(() => {
-    if (isDragging) {
-      setIsDragging(false)
-      // Pozisyonu localStorage'a kaydet
-      localStorage.setItem('floatingButtonPosition', JSON.stringify(buttonPosition))
-      
-      // Kısa süre sonra hasMoved'i sıfırla
-      setTimeout(() => setHasMoved(false), 100)
-    }
-  }, [isDragging, buttonPosition])
-
-  // Aktif trade varsa onun sembolüne WebSocket bağla
+  // Aktif trade'ler varsa çoklu WebSocket bağlantısını yönet
   useEffect(() => {
-    if (activeTradeData?.isActive && activeTradeData.symbol !== selectedPair) {
-      setSelectedPair(activeTradeData.symbol)
+    // Mevcut activeTrades'i kontrol et ve eski localStorage'u temizle
+    const oldTrade = localStorage.getItem('activeTrade')
+    if (oldTrade) {
+      localStorage.removeItem('activeTrade')
+      console.log('Eski tek trade localStorage verisi temizlendi')
     }
-    // Eğer activeTradeData null olduşsa (trade kapatıldıysa), localStorage'u tekrar kontrol etme
-    if (!activeTradeData) {
-      const savedTrade = localStorage.getItem('activeTrade')
-      if (savedTrade) {
-        // Eğer hala localStorage'da veri varsa ama activeTradeData null ise, 
-        // bu bir tutarsızlıktır, localStorage'u temizle
-        localStorage.removeItem('activeTrade')
-        console.log('Tutarsız localStorage verisi temizlendi')
-      }
-    }
-  }, [activeTradeData, selectedPair])
 
-  // Global drag event listeners
+    // Aktif trade'lerin coin'lerini al (TÜM aktif trade'ler)
+    if (activeTrades.length > 0) {
+      const uniqueSymbols = [...new Set(activeTrades
+        .map(trade => trade.symbol))]; // TÜM aktif trade'lerin sembollerini al
+      console.log('🚀 [MultiWS Setup] Aktif trade coinleri:', uniqueSymbols, 'Trade sayısı:', activeTrades.length)
+      activeTrades.forEach(trade => {
+        console.log(`  📍 Trade: ${trade.symbol} | ID: ${trade.id.substring(0, 10)}... | Giriş: $${trade.entryPrice}`)
+      })
+      connectMultiWebSockets(uniqueSymbols)
+    } else {
+      // Aktif trade yoksa tüm çoklu WebSocket'ları kapat
+      multiWsRefs.current.forEach((ws) => {
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close()
+        }
+      })
+      multiWsRefs.current.clear()
+    }
+  }, [activeTrades, connectMultiWebSockets])
+
+  // Fallback fiyat güncellemeyi 5 saniyede bir çalıştır
   useEffect(() => {
-    const handleGlobalMouseMove = (e: MouseEvent) => {
-      if (isDragging) {
-        e.preventDefault()
-        e.stopPropagation()
-        handleMouseMove(e)
-      }
-    }
+    const interval = setInterval(() => {
+      fallbackPriceUpdate();
+    }, 5000); // 5 saniye
     
-    const handleGlobalTouchMove = (e: TouchEvent) => {
-      if (isDragging) {
-        e.preventDefault()
-        e.stopPropagation()
-        handleTouchMove(e)
-      }
-    }
-    
-    const handleGlobalMouseUp = () => handleDragEnd()
-    const handleGlobalTouchEnd = () => handleDragEnd()
+    return () => clearInterval(interval);
+  }, [fallbackPriceUpdate]);
 
-    if (isDragging) {
-      // Sayfanın scroll olmasını engelle
-      document.body.style.overflow = 'hidden'
-      document.body.style.touchAction = 'none'
-      
-      document.addEventListener('mousemove', handleGlobalMouseMove, { passive: false })
-      document.addEventListener('mouseup', handleGlobalMouseUp)
-      document.addEventListener('touchmove', handleGlobalTouchMove, { passive: false })
-      document.addEventListener('touchend', handleGlobalTouchEnd)
-    }
-
-    return () => {
-      // Scroll'u tekrar aktif et
-      document.body.style.overflow = ''
-      document.body.style.touchAction = ''
-      
-      document.removeEventListener('mousemove', handleGlobalMouseMove)
-      document.removeEventListener('mouseup', handleGlobalMouseUp)
-      document.removeEventListener('touchmove', handleGlobalTouchMove)
-      document.removeEventListener('touchend', handleGlobalTouchEnd)
-    }
-  }, [isDragging, dragStart, buttonPosition, handleDragEnd, handleMouseMove, handleTouchMove])
   // Filtrelenmiş trading çiftleri
   const filteredPairs = tradingPairs.filter(pair => 
     pair.symbol.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -1001,7 +1458,7 @@ export default function TradingSimulator() {
                       
                       setTimeout(() => setIsPairSwitching(false), 1000)
                     }}
-                    disabled={activeTradeData?.isActive}
+                    disabled={false}
                     className="w-full mt-3 sm:mt-4 px-4 sm:px-6 py-3 sm:py-4 bg-gradient-to-r from-gray-700/60 to-gray-800/60 border border-gray-600/50 rounded-xl sm:rounded-2xl text-white focus:border-purple-500 focus:ring-4 focus:ring-purple-500/20 transition-all duration-300 disabled:opacity-50 backdrop-blur-sm shadow-lg hover:shadow-purple-500/10 text-sm sm:text-base"
                   >
                     {filteredPairs.length === 0 ? (
@@ -1014,6 +1471,86 @@ export default function TradingSimulator() {
                       ))
                     )}
                   </select>
+                </div>
+
+                {/* Anlık Fiyat ve Manuel Fiyat Girişi */}
+                <div className="mb-3 flex space-x-2">
+                  {/* Anlık Fiyat */}
+                  <div className="flex-1 bg-gray-800/60 backdrop-blur-sm rounded-lg p-2 border border-gray-700/30">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-gray-400 truncate">
+                        Anlık
+                      </span>
+                      <div className={`flex space-x-1 ${
+                        wsConnectionStatus === 'connected' ? '' : 'opacity-50'
+                      }`}>
+                        <div className={`rounded-full h-1 w-1 ${
+                          wsConnectionStatus === 'connected' ? 'bg-green-400' :
+                          wsConnectionStatus === 'connecting' ? 'bg-yellow-400' :
+                          wsConnectionStatus === 'error' ? 'bg-red-400' : 'bg-gray-400'
+                        }`}></div>
+                        <div className={`rounded-full h-1 w-1 ${
+                          wsConnectionStatus === 'connected' ? 'bg-green-400' :
+                          wsConnectionStatus === 'connecting' ? 'bg-yellow-400' :
+                          wsConnectionStatus === 'error' ? 'bg-red-400' : 'bg-gray-400'
+                        }`}></div>
+                      </div>
+                    </div>
+                    
+                    <div className="text-center mt-1">
+                      <div 
+                        ref={priceUpdateRef}
+                        className="text-base font-bold price-display truncate"
+                      >
+                        {isPairSwitching ? (
+                          <div className="flex items-center justify-center">
+                            <div className="animate-spin rounded-full h-3 w-3 border-b border-blue-500 mr-1"></div>
+                            <span className="text-xs">Yükleniyor...</span>
+                          </div>
+                        ) : (
+                          `$${formatPrice(currentPrice)}`
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  
+                  {/* Manuel Fiyat Girişi */}
+                  <div className="flex-1 bg-gray-800/60 backdrop-blur-sm rounded-lg p-2 border border-gray-700/30">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-gray-400 truncate">
+                        Manuel Fiyat
+                      </span>
+                    </div>
+                    
+                    <div className="mt-1 flex items-center">
+                      <input
+                        type="number"
+                        value={manualPrice !== null ? manualPrice : currentPrice}
+                        onChange={(e) => setManualPrice(e.target.value ? parseFloat(e.target.value) : null)}
+                        placeholder="Fiyat girin"
+                        className="flex-1 bg-transparent text-base font-bold text-white placeholder-gray-500 focus:outline-none"
+                        step="0.00000001"
+                      />
+                      <div className="flex flex-col ml-1">
+                        <button 
+                          onClick={() => setManualPrice((manualPrice !== null ? manualPrice : currentPrice) + (currentPrice * 0.001))}
+                          className="text-gray-400 hover:text-white p-1"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+                          </svg>
+                        </button>
+                        <button 
+                          onClick={() => setManualPrice((manualPrice !== null ? manualPrice : currentPrice) - (currentPrice * 0.001))}
+                          className="text-gray-400 hover:text-white p-1"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
                 {/* Pozisyon Tipi */}
@@ -1029,7 +1566,7 @@ export default function TradingSimulator() {
                   <div className="grid grid-cols-2 gap-3 sm:gap-4">
                     <button
                       onClick={() => setTradeType('long')}
-                      disabled={activeTradeData?.isActive}
+                      disabled={false}
                       className={`px-3 sm:px-4 py-3 sm:py-4 rounded-xl font-bold transition-all duration-300 disabled:opacity-50 transform hover:scale-105 shadow-lg touch-manipulation ${
                         tradeType === 'long'
                           ? 'bg-gradient-to-r from-green-500 to-emerald-600 text-white shadow-green-500/50 ring-4 ring-green-400/30'
@@ -1042,7 +1579,7 @@ export default function TradingSimulator() {
                     </button>
                     <button
                       onClick={() => setTradeType('short')}
-                      disabled={activeTradeData?.isActive}
+                      disabled={false}
                       className={`px-3 sm:px-4 py-3 sm:py-4 rounded-xl font-bold transition-all duration-300 disabled:opacity-50 transform hover:scale-105 shadow-lg touch-manipulation ${
                         tradeType === 'short'
                           ? 'bg-gradient-to-r from-red-500 to-pink-600 text-white shadow-red-500/50 ring-4 ring-red-400/30'
@@ -1078,7 +1615,7 @@ export default function TradingSimulator() {
                       max={maxLeverage}
                       value={Math.min(leverage, maxLeverage)}
                       onChange={(e) => setLeverage(Number(e.target.value))}
-                      disabled={activeTradeData?.isActive}
+                      disabled={false}
                       className="w-full h-4 bg-gradient-to-r from-gray-700 to-gray-800 rounded-full appearance-none cursor-pointer slider-modern disabled:opacity-50"
                     />
                     <div className="grid grid-cols-9 gap-1 mt-4">
@@ -1086,7 +1623,7 @@ export default function TradingSimulator() {
                         <button
                           key={leverageValue}
                           onClick={() => setLeverage(leverageValue)}
-                          disabled={activeTradeData?.isActive}
+                          disabled={false}
                           className={`px-2 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all duration-300 disabled:opacity-50 transform hover:scale-105 touch-manipulation ${
                             leverage === leverageValue
                               ? 'bg-gradient-to-r from-yellow-500 to-orange-500 text-black shadow-lg shadow-yellow-500/50'
@@ -1155,7 +1692,7 @@ export default function TradingSimulator() {
                           setInvestment(1)
                         }
                       }}
-                      disabled={activeTradeData?.isActive}
+                      disabled={false}
                       min="1"
                       max="15000"
                       placeholder="Yatırım miktarını girin..."
@@ -1189,7 +1726,7 @@ export default function TradingSimulator() {
                             setLeverage(newMaxLeverage)
                           }
                         }}
-                        disabled={activeTradeData?.isActive}
+                        disabled={false}
                         className={`px-4 py-3 rounded-xl font-bold transition-all duration-300 disabled:opacity-50 transform hover:scale-105 text-sm ${
                           investment === amount 
                             ? 'bg-gradient-to-r from-green-500 to-emerald-600 text-white shadow-lg shadow-green-500/50'
@@ -1204,250 +1741,141 @@ export default function TradingSimulator() {
 
                 {/* Trade Butonu */}
                 <div className="pt-4 sm:pt-6">
-                  {!activeTradeData?.isActive ? (
-                    <button
-                      onClick={startTrade}
-                      disabled={isLoading || currentPrice === 0}
-                      className="w-full bg-gradient-to-r from-purple-600 via-pink-600 to-purple-700 hover:from-purple-700 hover:via-pink-700 hover:to-purple-800 text-white font-bold py-5 sm:py-6 px-6 sm:px-8 rounded-xl sm:rounded-2xl transition-all duration-300 disabled:opacity-50 shadow-2xl shadow-purple-500/50 transform hover:scale-105 glow-animation text-lg sm:text-xl touch-manipulation"
-                    >
-                      {isLoading ? (
-                        <div className="flex items-center justify-center">
-                          <div className="animate-spin rounded-full h-5 w-5 sm:h-6 sm:w-6 border-b-3 border-white mr-2 sm:mr-3"></div>
-                          <span className="text-base sm:text-lg">Başlatılıyor...</span>
-                        </div>
-                      ) : (
-                        <div className="flex items-center justify-center">
-                          <span className="text-xl sm:text-2xl mr-2 sm:mr-3">🚀</span>
-                          <span>TRADE BAŞLAT</span>
-                        </div>
-                      )}
-                    </button>
-                  ) : (
-                    <button
-                      onClick={closeTrade}
-                      disabled={isLoading}
-                      className="w-full bg-gradient-to-r from-red-600 via-pink-600 to-red-700 hover:from-red-700 hover:via-pink-700 hover:to-red-800 text-white font-bold py-5 sm:py-6 px-6 sm:px-8 rounded-xl sm:rounded-2xl transition-all duration-300 disabled:opacity-50 shadow-2xl shadow-red-500/50 transform hover:scale-105 text-lg sm:text-xl touch-manipulation"
-                    >
-                      {isLoading ? (
-                        <div className="flex items-center justify-center">
-                          <div className="animate-spin rounded-full h-5 w-5 sm:h-6 sm:w-6 border-b-3 border-white mr-2 sm:mr-3"></div>
-                          <span className="text-base sm:text-lg">Kapatılıyor...</span>
-                        </div>
-                      ) : (
-                        <div className="flex items-center justify-center">
-                          <span className="text-xl sm:text-2xl mr-2 sm:mr-3">🔴</span>
-                          <span>TRADE KAPAT</span>
-                        </div>
-                      )}
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Orta Panel - Fiyat Bilgisi */}
-            <div className="lg:col-span-1 order-2 lg:order-2">
-              <div className="bg-gradient-to-br from-gray-800/60 via-gray-800/40 to-gray-900/60 backdrop-blur-xl rounded-2xl sm:rounded-3xl p-4 sm:p-6 border border-gray-700/30 shadow-2xl mb-4 sm:mb-6">
-                <h2 className="text-xl sm:text-2xl font-semibold mb-4 sm:mb-6 flex items-center">
-                  <span className="text-lg sm:text-xl mr-2">📊</span> Anlık Fiyat
-                </h2>
-                
-                <div className="text-center">
-                  <div className="text-base sm:text-lg text-gray-400 mb-2">
-                    {selectedPair.replace('USDT', '/USDT')}
-                  </div>
-                  <div 
-                    ref={priceUpdateRef}
-                    className="text-2xl sm:text-3xl lg:text-4xl font-bold mb-4 price-display"
+                  <button
+                    onClick={startTrade}
+                    disabled={isLoading || currentPrice === 0 || activeTrades.length >= 5}
+                    className="w-full bg-gradient-to-r from-purple-600 via-pink-600 to-purple-700 hover:from-purple-700 hover:via-pink-700 hover:to-purple-800 text-white font-bold py-5 sm:py-6 px-6 sm:px-8 rounded-xl sm:rounded-2xl transition-all duration-300 disabled:opacity-50 shadow-2xl shadow-purple-500/50 transform hover:scale-105 glow-animation text-lg sm:text-xl touch-manipulation"
                   >
-                    {isPairSwitching ? (
+                    {isLoading ? (
                       <div className="flex items-center justify-center">
-                        <div className="animate-spin rounded-full h-6 w-6 sm:h-8 sm:w-8 border-b-2 border-blue-500 mr-2"></div>
-                        <span className="text-base sm:text-lg">Yükleniyor...</span>
+                        <div className="animate-spin rounded-full h-5 w-5 sm:h-6 sm:w-6 border-b-3 border-white mr-2 sm:mr-3"></div>
+                        <span className="text-base sm:text-lg">Başlatılıyor...</span>
+                      </div>
+                    ) : activeTrades.length >= 5 ? (
+                      <div className="flex items-center justify-center">
+                        <span className="text-lg sm:text-xl mr-2">⚠️</span>
+                        <span>Maksimum Trade Sayısı (5/5)</span>
                       </div>
                     ) : (
-                      `$${formatPrice(currentPrice)}`
+                      <div className="flex items-center justify-center">
+                        <span className="text-xl sm:text-2xl mr-2 sm:mr-3">🚀</span>
+                        <span>TRADE BAŞLAT ({activeTrades.length}/5)</span>
+                      </div>
                     )}
-                  </div>
-                  <div className="flex items-center justify-center">
-                    <div className={`animate-pulse flex space-x-1 ${
-                      wsConnectionStatus === 'connected' ? '' : 'opacity-50'
-                    }`}>
-                      <div className={`rounded-full h-1.5 w-1.5 sm:h-2 sm:w-2 ${
-                        wsConnectionStatus === 'connected' ? 'bg-green-400' :
-                        wsConnectionStatus === 'connecting' ? 'bg-yellow-400' :
-                        wsConnectionStatus === 'error' ? 'bg-red-400' : 'bg-gray-400'
-                      }`}></div>
-                      <div className={`rounded-full h-1.5 w-1.5 sm:h-2 sm:w-2 ${
-                        wsConnectionStatus === 'connected' ? 'bg-green-400' :
-                        wsConnectionStatus === 'connecting' ? 'bg-yellow-400' :
-                        wsConnectionStatus === 'error' ? 'bg-red-400' : 'bg-gray-400'
-                      }`}></div>
-                      <div className={`rounded-full h-1.5 w-1.5 sm:h-2 sm:w-2 ${
-                        wsConnectionStatus === 'connected' ? 'bg-green-400' :
-                        wsConnectionStatus === 'connecting' ? 'bg-yellow-400' :
-                        wsConnectionStatus === 'error' ? 'bg-red-400' : 'bg-gray-400'
-                      }`}></div>
-                    </div>
-                    <span className={`ml-2 sm:ml-3 text-xs sm:text-sm ${
-                      wsConnectionStatus === 'connected' ? 'text-green-300' :
-                      wsConnectionStatus === 'connecting' ? 'text-yellow-300' :
-                      wsConnectionStatus === 'error' ? 'text-red-300' : 'text-gray-400'
-                    }`}>
-                      {wsConnectionStatus === 'connected' ? '📡 Canlı Veri' :
-                       wsConnectionStatus === 'connecting' ? '🔄 Bağlanıyor...' :
-                       wsConnectionStatus === 'error' ? '⚠️ Bağlantı Hatası' : '📴 Bağlantısız'}
-                    </span>
-                  </div>
+                  </button>
                 </div>
               </div>
-
-              {/* Hesaplama Detayları */}
-              {currentPrice > 0 && (
-                <div className="bg-gradient-to-br from-gray-800/60 via-gray-800/40 to-gray-900/60 backdrop-blur-xl rounded-2xl sm:rounded-3xl p-4 sm:p-6 border border-gray-700/30 shadow-2xl">
-                  <h3 className="text-lg sm:text-xl font-semibold mb-3 sm:mb-4">
-                    <span className="mr-2">🧮</span>Hesaplama Detayları
-                  </h3>
-                  <div className="space-y-2 sm:space-y-3">
-                    <div className="flex justify-between items-center text-sm sm:text-base">
-                      <span className="text-gray-400">Pozisyon Boyutu:</span>
-                      <span className="font-mono text-xs sm:text-sm">
-                        {((leverage * investment) / currentPrice).toFixed(6)} {selectedPair.replace('USDT', '')}
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-center text-sm sm:text-base">
-                      <span className="text-gray-400">Toplam Değer:</span>
-                      <span className="font-mono text-xs sm:text-sm">
-                        ${(leverage * investment).toLocaleString('tr-TR')}
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-center text-sm sm:text-base">
-                      <span className="text-gray-400">Giriş Fiyatı:</span>
-                      <span className="font-mono text-xs sm:text-sm">
-                        ${formatPrice(currentPrice)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              )}
             </div>
 
-            {/* Sağ Panel - Aktif Trade */}
+
+
+            {/* Sağ Panel - Aktif Trade'ler */}
             <div className="lg:col-span-1 order-3" ref={activeTradeRef}>
-              {activeTradeData?.isActive ? (
+              {activeTrades.length > 0 ? (
                 <div className="bg-gradient-to-br from-gray-800/60 via-gray-800/40 to-gray-900/60 backdrop-blur-xl rounded-2xl sm:rounded-3xl p-4 sm:p-6 border border-gray-700/30 shadow-2xl">
-                  <h2 className="text-xl sm:text-2xl font-semibold mb-4 sm:mb-6 flex items-center">
-                    <span className="text-lg sm:text-xl mr-2">🔥</span> Aktif Trade
+                  <h2 className="text-xl sm:text-2xl font-semibold mb-4 sm:mb-6 flex items-center justify-between">
+                    <div className="flex items-center">
+                      <span className="text-lg sm:text-xl mr-2">🔥</span> Aktif Trade&apos;ler
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-400 bg-gray-700/50 px-2 py-1 rounded-lg">
+                        {activeTrades.length} Aktif
+                      </span>
+                      <span className="text-sm text-yellow-400 bg-yellow-700/30 px-2 py-1 rounded-lg">
+                        {pendingOrders.length} Bekleyen
+                      </span>
+                      <span className="text-xs text-gray-400">
+                        ({activeTrades.length + pendingOrders.length}/5)
+                      </span>
+                    </div>
                   </h2>
                   
-                  <div className="space-y-4">
-                    <div className="flex justify-between items-center p-3 bg-gray-700/50 rounded-xl">
-                      <span className="text-gray-300">Coin:</span>
-                      <span className="font-bold text-lg">
-                        {activeTradeData.symbol.replace('USDT', '/USDT')}
-                      </span>
-                    </div>
-
-                    <div className="flex justify-between items-center p-3 bg-gray-700/50 rounded-xl">
-                      <span className="text-gray-300">Pozisyon:</span>
-                      <span className={`font-bold px-3 py-1 rounded-full ${
-                        activeTradeData.type === 'long' 
-                          ? 'bg-green-600/20 text-green-400' 
-                          : 'bg-red-600/20 text-red-400'
-                      }`}>
-                        {activeTradeData.type === 'long' ? '📈 LONG' : '📉 SHORT'}
-                      </span>
-                    </div>
-
-                    <div className="flex justify-between items-center p-3 bg-gray-700/50 rounded-xl">
-                      <span className="text-gray-300">Giriş Fiyatı:</span>
-                      <span className="font-mono">
-                        ${formatPrice(activeTradeData.entryPrice)}
-                      </span>
-                    </div>
-
-                    <div className="flex justify-between items-center p-3 bg-gray-700/50 rounded-xl">
-                      <span className="text-gray-300">Güncel Fiyat:</span>
-                      <span className="font-mono">
-                        ${formatPrice(activeTradeData.currentPrice)}
-                      </span>
-                    </div>
-
-                    <div className="flex justify-between items-center p-3 bg-gray-700/50 rounded-xl">
-                      <span className="text-gray-300">Kaldıraç:</span>
-                      <span className="font-bold">{activeTradeData.leverage}x</span>
-                    </div>
-
-                    <div className="flex justify-between items-center p-3 bg-gray-700/50 rounded-xl">
-                      <span className="text-gray-300">Yatırım:</span>
-                      <span className="font-mono">${activeTradeData.investment}</span>
-                    </div>
-
-                    <div className={`flex justify-between items-center p-3 rounded-xl border-2 ${
-                      activeTradeData.type === 'long' 
-                        ? (activeTradeData.currentPrice <= activeTradeData.liquidationPrice ? 'bg-red-900/50 border-red-500' : 'bg-orange-900/30 border-orange-500/50')
-                        : (activeTradeData.currentPrice >= activeTradeData.liquidationPrice ? 'bg-red-900/50 border-red-500' : 'bg-orange-900/30 border-orange-500/50')
-                    }`}>
-                      <span className="text-gray-300">Liquidation Fiyatı:</span>
-                      <span className={`font-mono font-bold ${
-                        (activeTradeData.type === 'long' && activeTradeData.currentPrice <= activeTradeData.liquidationPrice) ||
-                        (activeTradeData.type === 'short' && activeTradeData.currentPrice >= activeTradeData.liquidationPrice)
-                          ? 'text-red-400' : 'text-orange-400'
-                      }`}>
-                        ${formatPrice(activeTradeData.liquidationPrice)}
-                      </span>
-                    </div>
-
-                    {/* PnL Gösterimi */}
-                    <div className={`p-4 rounded-xl border-2 ${
-                      activeTradeData.pnl >= 0 
-                        ? 'bg-green-900/30 border-green-500/50' 
-                        : 'bg-red-900/30 border-red-500/50'
-                    }`}>
-                      <div className="text-center">
-                        <div className="text-sm text-gray-300 mb-2">💰 Kazanç/Kayıp</div>
-                        <div className={`text-3xl font-bold mb-2 ${
-                          activeTradeData.pnl >= 0 ? 'text-green-400' : 'text-red-400'
-                        }`}>
-                          {formatPnL(activeTradeData.pnl)}
+                  <div className="space-y-3 max-h-[80vh] overflow-y-auto">
+                    {activeTrades.map((trade) => (
+                      <div key={trade.id} className="bg-gray-700/30 rounded-xl p-4 border border-gray-600/50">
+                        <div className="flex justify-between items-center mb-3">
+                          <div className="flex items-center space-x-2">
+                            <span className="font-bold text-lg">{trade.symbol.replace('USDT', '/USDT')}</span>
+                            <span className={`px-2 py-1 rounded-full text-xs font-bold ${
+                              trade.type === 'long' 
+                                ? 'bg-green-600/20 text-green-400' 
+                                : 'bg-red-600/20 text-red-400'
+                            }`}>
+                              {trade.type === 'long' ? '📈 LONG' : '📉 SHORT'}
+                            </span>
+                          </div>
+                          <button
+                            onClick={() => closeTrade(trade.id)}
+                            className="bg-red-600/20 hover:bg-red-600/40 text-red-400 px-2 py-1 rounded-lg text-xs transition-colors"
+                            disabled={isLoading}
+                          >
+                            ✕
+                          </button>
                         </div>
-                        <div className={`text-lg ${
-                          activeTradeData.roi >= 0 ? 'text-green-300' : 'text-red-300'
+                        
+                        <div className="grid grid-cols-2 gap-2 text-sm">
+                          <div className="text-gray-400">Giriş: <span className="text-white">${formatPrice(trade.entryPrice)}</span></div>
+                          <div className="text-gray-400">Güncel: <span className="text-white">${formatPrice(trade.currentPrice)}</span></div>
+                          <div className="text-gray-400">Kaldıraç: <span className="text-white">{trade.leverage}x</span></div>
+                          <div className="text-gray-400">Yatırım: <span className="text-white">${trade.investment}</span></div>
+                        </div>
+                        
+                        <div className={`mt-3 p-3 rounded-lg text-center ${
+                          trade.pnl >= 0 
+                            ? 'bg-green-900/30 border border-green-500/50' 
+                            : 'bg-red-900/30 border border-red-500/50'
                         }`}>
-                          {activeTradeData.roi >= 0 ? '+' : ''}{activeTradeData.roi.toFixed(2)}%
+                          <div className={`text-lg font-bold ${
+                            trade.pnl >= 0 ? 'text-green-400' : 'text-red-400'
+                          }`}>
+                            {formatPnL(trade.pnl)}
+                          </div>
+                          <div className={`text-sm ${
+                            trade.roi >= 0 ? 'text-green-300' : 'text-red-300'
+                          }`}>
+                            {trade.roi >= 0 ? '+' : ''}{trade.roi.toFixed(2)}%
+                          </div>
+                        </div>
+                        
+                        <div className="mt-2 text-xs text-gray-400 flex justify-between items-center">
+                          <span>
+                            Liq: <span className={`${
+                              (trade.type === 'long' && trade.currentPrice <= trade.liquidationPrice) ||
+                              (trade.type === 'short' && trade.currentPrice >= trade.liquidationPrice)
+                                ? 'text-red-400 font-bold' : 'text-orange-400'
+                            }`}>
+                              ${formatPrice(trade.liquidationPrice)}
+                            </span>
+                          </span>
+                          <button
+                            onClick={() => {
+                              setSelectedTradeId(trade.id)
+                              setUsernameInput(username)
+                              setShowUsernameModal(true)
+                            }}
+                            className="bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 px-2 py-1 rounded-lg text-xs transition-colors flex items-center space-x-1"
+                          >
+                            <span>📸</span>
+                            <span>Paylaş</span>
+                          </button>
                         </div>
                       </div>
-                    </div>
-
-                    <div className="mt-6 p-4 bg-blue-900/30 rounded-xl border border-blue-500/30">
-                      <div className="flex items-center justify-center">
-                        <div className="animate-pulse flex space-x-1">
-                          <div className="rounded-full bg-blue-400 h-2 w-2"></div>
-                          <div className="rounded-full bg-blue-400 h-2 w-2"></div>
-                          <div className="rounded-full bg-blue-400 h-2 w-2"></div>
-                        </div>
-                        <span className="ml-3 text-sm text-blue-300">
-                          📊 Gerçek zamanlı güncelleniyor...
-                        </span>
+                    ))}
+                  </div>
+                  
+                  <div className="mt-6 p-4 bg-blue-900/30 rounded-xl border border-blue-500/30">
+                    <div className="flex items-center justify-center">
+                      <div className="animate-pulse flex space-x-1">
+                        <div className="rounded-full bg-blue-400 h-2 w-2"></div>
+                        <div className="rounded-full bg-blue-400 h-2 w-2"></div>
+                        <div className="rounded-full bg-blue-400 h-2 w-2"></div>
                       </div>
-                    </div>
-
-                    {/* Paylaşım Butonu */}
-                    <div className="mt-6">
-                      <button
-                        onClick={() => {
-                          // Önce kullanıcı adı modalını aç
-                          setUsernameInput(username) // Mevcut username'i input'a yükle
-                          setShowUsernameModal(true)
-                        }}
-                        className="w-full bg-gradient-to-r from-blue-600 via-purple-600 to-blue-700 hover:from-blue-700 hover:via-purple-700 hover:to-blue-800 text-white font-bold py-4 px-6 rounded-xl transition-all duration-300 shadow-xl shadow-blue-500/30 transform hover:scale-105 flex items-center justify-center space-x-3 text-lg"
-                      >
-                        <span className="text-xl">📸</span>
-                        <span>PAYLAŞ</span>
-                        <span className="text-sm opacity-80">(Screenshot)</span>
-                      </button>
+                      <span className="ml-3 text-sm text-blue-300">
+                        📊 Gerçek zamanlı güncelleniyor...
+                      </span>
                     </div>
                   </div>
+
                 </div>
               ) : (
                 <div className="bg-gray-800/50 backdrop-blur-lg rounded-2xl p-6 border border-gray-700/50 shadow-2xl">
@@ -1536,6 +1964,62 @@ export default function TradingSimulator() {
                   </div>
                 </div>
               )}
+              
+              {/* Bekleyen Emirler */}
+              {pendingOrders.length > 0 && (
+                <div className="mt-6 bg-gradient-to-br from-yellow-800/40 via-orange-800/30 to-yellow-900/40 backdrop-blur-xl rounded-2xl sm:rounded-3xl p-4 sm:p-6 border border-yellow-700/30 shadow-2xl">
+                  <h2 className="text-xl sm:text-2xl font-semibold mb-4 sm:mb-6 flex items-center justify-between">
+                    <div className="flex items-center">
+                      <span className="text-lg sm:text-xl mr-2">⏳</span> Bekleyen Emirler
+                    </div>
+                    <span className="text-sm text-yellow-300 bg-yellow-700/50 px-2 py-1 rounded-lg">
+                      {pendingOrders.length}
+                    </span>
+                  </h2>
+                  
+                  <div className="space-y-3 max-h-[40vh] overflow-y-auto">
+                    {pendingOrders.map((order) => (
+                      <div key={order.id} className="bg-yellow-900/20 rounded-xl p-4 border border-yellow-600/50">
+                        <div className="flex justify-between items-center mb-3">
+                          <div className="flex items-center space-x-2">
+                            <span className="font-bold text-lg">{order.symbol.replace('USDT', '/USDT')}</span>
+                            <span className={`px-2 py-1 rounded-full text-xs font-bold ${
+                              order.type === 'long' 
+                                ? 'bg-green-600/20 text-green-400' 
+                                : 'bg-red-600/20 text-red-400'
+                            }`}>
+                              {order.type === 'long' ? '📈 LONG' : '📉 SHORT'}
+                            </span>
+                          </div>
+                          <button
+                            onClick={() => cancelPendingOrder(order.id)}
+                            className="bg-red-600/20 hover:bg-red-600/40 text-red-400 px-2 py-1 rounded-lg text-xs transition-colors"
+                          >
+                            ✕ İptal
+                          </button>
+                        </div>
+                        
+                        <div className="grid grid-cols-2 gap-2 text-sm">
+                          <div className="text-gray-400">Hedef: <span className="text-yellow-300 font-bold">${formatPrice(order.targetPrice)}</span></div>
+                          <div className="text-gray-400">Kaldıraç: <span className="text-white">{order.leverage}x</span></div>
+                          <div className="text-gray-400">Yatırım: <span className="text-white">${order.investment}</span></div>
+                          <div className="text-gray-400">Oluşturulma: <span className="text-white text-xs">
+                            {new Date(order.createdAt).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}
+                          </span></div>
+                        </div>
+                        
+                        <div className="mt-3 p-2 bg-yellow-900/30 rounded-lg text-center border border-yellow-500/30">
+                          <div className="text-xs text-yellow-300">
+                            {order.type === 'long' 
+                              ? `Fiyat $${order.targetPrice.toFixed(2)} veya altına düştüğünde tetiklenir` 
+                              : `Fiyat $${order.targetPrice.toFixed(2)} veya üstüne çıktığında tetiklenir`}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -1562,41 +2046,6 @@ export default function TradingSimulator() {
           </div>
         </div>
 
-        {/* Floating Trade Kapat Button - Sadece aktif trade varsa görünür */}
-        {activeTradeData?.isActive && (
-          <div 
-            className="fixed z-50 lg:hidden"
-            style={{
-              left: `${buttonPosition.x}px`,
-              top: `${buttonPosition.y}px`,
-              cursor: isDragging ? 'grabbing' : 'grab'
-            }}
-          >
-            <button
-              onClick={() => {
-                // Sadece hareket etmediyse close işlemini yap
-                if (!hasMoved && !isDragging) {
-                  closeTrade()
-                }
-              }}
-              onMouseDown={handleMouseDown}
-              onTouchStart={handleTouchStart}
-              disabled={isLoading}
-              className={`bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white font-bold py-3 px-5 rounded-full shadow-2xl shadow-red-500/50 transition-all duration-300 disabled:opacity-50 touch-manipulation flex items-center space-x-2 select-none ${
-                isDragging ? 'scale-110 cursor-grabbing' : 'transform hover:scale-105 cursor-grab'
-              }`}
-            >
-              {isLoading ? (
-                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
-              ) : (
-                <>
-                  <span className="text-lg">❌</span>
-                  <span className="text-xs font-bold whitespace-nowrap">POZISYONU KAPAT</span>
-                </>
-              )}
-            </button>
-          </div>
-        )}
 
         {/* Kullanıcı Adı Modal */}
         {showUsernameModal && (
@@ -1711,7 +2160,7 @@ export default function TradingSimulator() {
         )}
 
         {/* Paylaşım Modal */}
-        {showShareModal && activeTradeData && (
+        {showShareModal && activeTrades.length > 0 && selectedTrade && (
           <>
             {/* Overlay - Tamamen opak arka plan */}
             <div 
@@ -1773,40 +2222,40 @@ export default function TradingSimulator() {
                     <div className="flex items-center justify-between mb-4 sm:mb-5 lg:mb-6">
                       <div>
                         <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold text-white mb-1">
-                          {activeTradeData.symbol.replace('USDT', '/USDT')}
+                          {selectedTrade?.symbol.replace('USDT', '/USDT')}
                         </h2>
                         <div className={`inline-flex items-center px-2 sm:px-3 lg:px-4 py-1 sm:py-1.5 lg:py-2 rounded-full font-bold text-sm sm:text-base lg:text-lg ${
-                          activeTradeData.type === 'long' 
+                          selectedTrade?.type === 'long' 
                             ? 'bg-green-600/20 text-green-400 border border-green-500/30' 
                             : 'bg-red-600/20 text-red-400 border border-red-500/30'
                         }`}>
-                          {activeTradeData.type === 'long' ? '📈 LONG' : '📉 SHORT'} {activeTradeData.leverage}x
+                          {selectedTrade?.type === 'long' ? '📈 LONG' : '📉 SHORT'} {selectedTrade?.leverage}x
                         </div>
                       </div>
                       <div className="text-right">
                         <div className="text-gray-400 text-xs sm:text-sm mb-1">Güncel Fiyat</div>
                         <div className="text-lg sm:text-xl lg:text-2xl font-mono font-bold text-white">
-                          ${formatPrice(activeTradeData.currentPrice)}
+                          ${formatPrice(selectedTrade?.currentPrice)}
                         </div>
                       </div>
                     </div>
 
                     {/* Ana Kar/Zarar Göstergesi */}
                     <div className={`text-center p-4 sm:p-5 lg:p-6 rounded-xl border-2 mb-4 sm:mb-5 lg:mb-6 ${
-                      activeTradeData.pnl >= 0 
+                      selectedTrade?.pnl >= 0 
                         ? 'bg-green-900/30 border-green-500/50' 
                         : 'bg-red-900/30 border-red-500/50'
                     }`}>
                       <div className="text-gray-300 text-xs sm:text-sm mb-1 sm:mb-2">Realized PnL</div>
                       <div className={`text-2xl sm:text-3xl lg:text-4xl font-bold mb-1 sm:mb-2 ${
-                        activeTradeData.pnl >= 0 ? 'text-green-400' : 'text-red-400'
+                        selectedTrade?.pnl >= 0 ? 'text-green-400' : 'text-red-400'
                       }`}>
-                        {formatPnL(activeTradeData.pnl)}
+                        {formatPnL(selectedTrade?.pnl)}
                       </div>
                       <div className={`text-base sm:text-lg lg:text-xl font-bold ${
-                        activeTradeData.roi >= 0 ? 'text-green-300' : 'text-red-300'
+                        selectedTrade?.roi >= 0 ? 'text-green-300' : 'text-red-300'
                       }`}>
-                        ROE: {activeTradeData.roi >= 0 ? '+' : ''}{activeTradeData.roi.toFixed(2)}%
+                        ROE: {selectedTrade?.roi >= 0 ? '+' : ''}{selectedTrade?.roi.toFixed(2)}%
                       </div>
                     </div>
 
@@ -1815,42 +2264,42 @@ export default function TradingSimulator() {
                       <div className="bg-gray-700/50 p-2 sm:p-3 lg:p-4 rounded-lg sm:rounded-xl">
                         <div className="text-gray-400 text-xs sm:text-sm mb-1">Giriş Fiyatı</div>
                         <div className="font-mono font-bold text-white text-sm sm:text-base">
-                          ${formatPrice(activeTradeData.entryPrice)}
+                          ${formatPrice(selectedTrade?.entryPrice)}
                         </div>
                       </div>
                       
                       <div className="bg-gray-700/50 p-2 sm:p-3 lg:p-4 rounded-lg sm:rounded-xl">
                         <div className="text-gray-400 text-xs sm:text-sm mb-1">Kapanış Fiyatı</div>
                         <div className="font-mono font-bold text-white text-sm sm:text-base">
-                          ${formatPrice(activeTradeData.currentPrice)}
+                          ${formatPrice(selectedTrade?.currentPrice)}
                         </div>
                       </div>
                       
                       <div className="bg-gray-700/50 p-2 sm:p-3 lg:p-4 rounded-lg sm:rounded-xl">
                         <div className="text-gray-400 text-xs sm:text-sm mb-1">Yatırım</div>
                         <div className="font-mono font-bold text-white text-sm sm:text-base">
-                          ${activeTradeData.investment.toLocaleString('tr-TR')}
+                          ${selectedTrade?.investment.toLocaleString('tr-TR')}
                         </div>
                       </div>
                       
                       <div className="bg-gray-700/50 p-2 sm:p-3 lg:p-4 rounded-lg sm:rounded-xl">
                         <div className="text-gray-400 text-xs sm:text-sm mb-1">Kaldıraç</div>
                         <div className="font-bold text-yellow-400 text-sm sm:text-base">
-                          {activeTradeData.leverage}x
+                          {selectedTrade?.leverage}x
                         </div>
                       </div>
                       
                       <div className="bg-gray-700/50 p-2 sm:p-3 lg:p-4 rounded-lg sm:rounded-xl">
                         <div className="text-gray-400 text-xs sm:text-sm mb-1">Pozisyon Boyutu</div>
                         <div className="font-mono text-white text-xs sm:text-sm">
-                          {((activeTradeData.leverage * activeTradeData.investment) / activeTradeData.entryPrice).toFixed(6)} {activeTradeData.symbol.replace('USDT', '')}
+                          {((selectedTrade?.leverage * selectedTrade?.investment) / selectedTrade?.entryPrice).toFixed(6)} {selectedTrade?.symbol.replace('USDT', '')}
                         </div>
                       </div>
                       
                       <div className="bg-gray-700/50 p-2 sm:p-3 lg:p-4 rounded-lg sm:rounded-xl">
                         <div className="text-gray-400 text-xs sm:text-sm mb-1">Toplam Değer</div>
                         <div className="font-mono text-white text-xs sm:text-sm">
-                          ${(activeTradeData.leverage * activeTradeData.investment).toLocaleString('tr-TR')}
+                          ${(selectedTrade?.leverage * selectedTrade?.investment).toLocaleString('tr-TR')}
                         </div>
                       </div>
                     </div>
@@ -1861,7 +2310,7 @@ export default function TradingSimulator() {
                         🔒 Bu platform, İndicSigs tarafından üretilen sinyallerin test amaçlı simülasyonudur. Gerçek para ile işlem yapılmaz.
                       </p>
                       <p className="text-gray-500 text-xs mt-1">
-                        Başlama Zamanı: {new Date(activeTradeData.startTime).toLocaleString('tr-TR')}
+                        Başlama Zamanı: {new Date(selectedTrade?.startTime).toLocaleString('tr-TR')}
                       </p>
                     </div>
                   </div>
@@ -1967,7 +2416,7 @@ export default function TradingSimulator() {
                             if (navigator.share && navigator.canShare) {
                               const shareData = {
                                 title: 'Trading Sonucum',
-                                text: `🔥 ${activeTradeData.symbol} ${activeTradeData.type.toUpperCase()} ${activeTradeData.leverage}x\n💰 PnL: ${formatPnL(activeTradeData.pnl)} (${activeTradeData.roi >= 0 ? '+' : ''}${activeTradeData.roi.toFixed(2)}%)`,
+                                text: `🔥 ${selectedTrade?.symbol} ${selectedTrade?.type.toUpperCase()} ${selectedTrade?.leverage}x\n💰 PnL: ${formatPnL(selectedTrade?.pnl || 0)} (${(selectedTrade?.roi || 0) >= 0 ? '+' : ''}${(selectedTrade?.roi || 0).toFixed(2)}%)`,
                                 files: [new File([imageBlob], 'trading-result.png', { type: 'image/png' })]
                               }
                               
