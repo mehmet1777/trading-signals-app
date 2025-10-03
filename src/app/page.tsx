@@ -52,6 +52,20 @@ interface PendingOrder {
   createdAt: Date
 }
 
+interface TakeProfitOrder {
+  tradeId: string
+  targetPrice: number
+  expectedPnL: number
+  expectedROI: number
+}
+
+interface StopLossOrder {
+  tradeId: string
+  targetPrice: number
+  expectedLoss: number
+  expectedROI: number
+}
+
 interface TradeStats {
   totalTrades: number
   winningTrades: number
@@ -97,6 +111,16 @@ export default function TradingSimulator() {
   }>({ coin: 'all', type: 'all', period: 'all' })
   const [availableCoins, setAvailableCoins] = useState<string[]>([])
   const [showInvestmentWarning, setShowInvestmentWarning] = useState(false)
+  
+  // Take Profit ve Stop Loss
+  const [takeProfitOrders, setTakeProfitOrders] = useState<TakeProfitOrder[]>([])
+  const [stopLossOrders, setStopLossOrders] = useState<StopLossOrder[]>([])
+  const [showTakeProfitModal, setShowTakeProfitModal] = useState(false)
+  const [showStopLossModal, setShowStopLossModal] = useState(false)
+  const [tpSlTradeId, setTpSlTradeId] = useState<string | null>(null)
+  const [tpSlPrice, setTpSlPrice] = useState<string>('')
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [currentTime, setCurrentTime] = useState(Date.now()) // Süre güncellemesi için (her saniye re-render tetikler)
 
   // Yatırım miktarına göre maksimum kaldıraç hesaplama
   const getMaxLeverage = (investmentAmount: number): number => {
@@ -178,11 +202,36 @@ export default function TradingSimulator() {
         console.log('💾 Bekleyen emirler geri yüklendi:', orders.length, 'emir')
       }
 
+      // Take Profit emirlerini yükle
+      const savedTpOrders = localStorage.getItem('takeProfitOrders')
+      if (savedTpOrders) {
+        const tpOrders = JSON.parse(savedTpOrders)
+        setTakeProfitOrders(tpOrders)
+        console.log('💾 Take Profit emirleri yüklendi:', tpOrders.length, 'emir')
+      }
+
+      // Stop Loss emirlerini yükle
+      const savedSlOrders = localStorage.getItem('stopLossOrders')
+      if (savedSlOrders) {
+        const slOrders = JSON.parse(savedSlOrders)
+        setStopLossOrders(slOrders)
+        console.log('💾 Stop Loss emirleri yüklendi:', slOrders.length, 'emir')
+      }
+
     } catch (error) {
       console.error('Trade/pozisyon geri yükleme hatası:', error)
       localStorage.removeItem('activeTrade')
       localStorage.removeItem('tradeHistory')
     }
+  }, [])
+
+  // Süre göstergesini her saniye güncelle
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setCurrentTime(Date.now())
+    }, 1000)
+
+    return () => clearInterval(interval)
   }, [])
 
   // Screenshot alma fonksiyonu - Multi-method approach
@@ -407,7 +456,6 @@ export default function TradingSimulator() {
             // Aktif trade'leri güncelle
             setActiveTrades(prevTrades => {
               console.log(`🔄 [SelectedWS] activeTrades kontrol: ${prevTrades.length} trade, ${symbol} için fiyat: ${newPrice}`);
-              let hasUpdated = false;
               const updatedTrades = prevTrades.map(trade => {
                 if (trade.symbol === symbol && trade.isActive) {
                   console.log(`💰 [SelectedWS] Trade güncelleniyor: ${symbol} - Fiyat: ${newPrice} - Giriş: ${trade.entryPrice} - Trade ID: ${trade.id}`);
@@ -417,6 +465,31 @@ export default function TradingSimulator() {
                     console.log(`LİKİDASYON! Fiyat: ${newPrice}, Liq Fiyatı: ${trade.liquidationPrice.toFixed(2)} - Trade ID: ${trade.id}`);
                     handleLiquidation(trade, newPrice);
                     return null; // Bu trade'i listeden çıkar
+                  }
+
+                  // Take Profit ve Stop Loss kontrolü
+                  const tpSlResult = checkTakeProfitStopLoss(newPrice, trade)
+                  if (tpSlResult.shouldClose) {
+                    // PnL hesapla
+                    const positionSize = (trade.leverage * trade.investment) / trade.entryPrice
+                    const pnl = trade.type === 'long' 
+                      ? (newPrice - trade.entryPrice) * positionSize
+                      : (trade.entryPrice - newPrice) * positionSize
+                    const roi = (pnl / trade.investment) * 100
+                    
+                    const closedTrade = { ...trade, currentPrice: newPrice, pnl, roi }
+                    
+                    // Geçmişe kaydet
+                    saveTradeToHistory(closedTrade, 'completed')
+                    
+                    // TP/SL emirlerini temizle
+                    setTakeProfitOrders(prev => prev.filter(tp => tp.tradeId !== trade.id))
+                    setStopLossOrders(prev => prev.filter(sl => sl.tradeId !== trade.id))
+                    localStorage.setItem('takeProfitOrders', JSON.stringify(takeProfitOrders.filter(tp => tp.tradeId !== trade.id)))
+                    localStorage.setItem('stopLossOrders', JSON.stringify(stopLossOrders.filter(sl => sl.tradeId !== trade.id)))
+                    
+                    console.log(`✅ ${tpSlResult.reason === 'tp' ? 'TAKE PROFIT' : 'STOP LOSS'} - Trade kapatıldı: ${trade.id}`)
+                    return null; // Trade kapatıldı
                   }
                   
                   const positionSize = (trade.leverage * trade.investment) / trade.entryPrice;
@@ -438,14 +511,13 @@ export default function TradingSimulator() {
                   };
                   
                   console.log(`Yeni PnL: ${pnl.toFixed(2)} - ROI: ${roi.toFixed(2)}% - Trade ID: ${trade.id}`);
-                  hasUpdated = true;
                   return updatedTrade;
                 }
                 return trade;
-              }).filter(trade => trade !== null); // Likidite olanları çıkar
+              }).filter(trade => trade !== null); // Likidite ve TP/SL tetiklenenleri çıkar
               
-              // Sadece gerçekten güncelleme yapıldıysa localStorage'ı güncelle
-              if (hasUpdated) {
+              // Trade sayısı değiştiyse veya herhangi bir güncelleme varsa localStorage'ı güncelle
+              if (prevTrades.length !== updatedTrades.length || updatedTrades.length > 0) {
                 if (updatedTrades.length > 0) {
                   localStorage.setItem('activeTrades', JSON.stringify(updatedTrades));
                 } else {
@@ -480,8 +552,8 @@ export default function TradingSimulator() {
       console.error(`WebSocket bağlantı kurma hatası (${symbol}):`, connectionError);
       setWsConnectionStatus('error');
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [takeProfitOrders, stopLossOrders]);
   
   // Aktif trade'ler için çoklu WebSocket bağlantı yönetimi
   const connectMultiWebSockets = useCallback((symbols: string[]) => {
@@ -537,7 +609,6 @@ export default function TradingSimulator() {
               // Bu symbol'e ait tüm trade'leri güncelle
               setActiveTrades(prevTrades => {
                 console.log(`🔄 [MultiWS] activeTrades kontrol: ${prevTrades.length} trade, ${symbol} için fiyat: ${newPrice}`);
-                let hasUpdated = false;
                 const updatedTrades = prevTrades.map(trade => {
                   if (trade.symbol === symbol && trade.isActive) {
                     console.log(`💰 [MultiWS] Trade güncelleniyor: ${symbol} - Fiyat: ${newPrice} - Giriş: ${trade.entryPrice} - Trade ID: ${trade.id}`);
@@ -547,6 +618,31 @@ export default function TradingSimulator() {
                       console.log(`LİKİDASYON! Fiyat: ${newPrice}, Liq Fiyatı: ${trade.liquidationPrice.toFixed(2)} - Trade ID: ${trade.id}`);
                       handleLiquidation(trade, newPrice);
                       return null; // Bu trade'i listeden çıkar
+                    }
+
+                    // Take Profit ve Stop Loss kontrolü
+                    const tpSlResult = checkTakeProfitStopLoss(newPrice, trade)
+                    if (tpSlResult.shouldClose) {
+                      // PnL hesapla
+                      const positionSize = (trade.leverage * trade.investment) / trade.entryPrice
+                      const pnl = trade.type === 'long' 
+                        ? (newPrice - trade.entryPrice) * positionSize
+                        : (trade.entryPrice - newPrice) * positionSize
+                      const roi = (pnl / trade.investment) * 100
+                      
+                      const closedTrade = { ...trade, currentPrice: newPrice, pnl, roi }
+                      
+                      // Geçmişe kaydet
+                      saveTradeToHistory(closedTrade, 'completed')
+                      
+                      // TP/SL emirlerini temizle
+                      setTakeProfitOrders(prev => prev.filter(tp => tp.tradeId !== trade.id))
+                      setStopLossOrders(prev => prev.filter(sl => sl.tradeId !== trade.id))
+                      localStorage.setItem('takeProfitOrders', JSON.stringify(takeProfitOrders.filter(tp => tp.tradeId !== trade.id)))
+                      localStorage.setItem('stopLossOrders', JSON.stringify(stopLossOrders.filter(sl => sl.tradeId !== trade.id)))
+                      
+                      console.log(`✅ ${tpSlResult.reason === 'tp' ? 'TAKE PROFIT' : 'STOP LOSS'} - Trade kapatıldı: ${trade.id}`)
+                      return null; // Trade kapatıldı
                     }
                     
                     const positionSize = (trade.leverage * trade.investment) / trade.entryPrice;
@@ -568,14 +664,13 @@ export default function TradingSimulator() {
                     };
                     
                     console.log(`Yeni PnL: ${pnl.toFixed(2)} - ROI: ${roi.toFixed(2)}% - Trade ID: ${trade.id}`);
-                    hasUpdated = true;
                     return updatedTrade;
                   }
                   return trade;
-                }).filter(trade => trade !== null); // Likidite olanları çıkar
+                }).filter(trade => trade !== null); // Likidite ve TP/SL tetiklenenleri çıkar
                 
-                // Sadece gerçekten güncelleme yapıldıysa localStorage'ı güncelle
-                if (hasUpdated) {
+                // Trade sayısı değiştiyse veya herhangi bir güncelleme varsa localStorage'ı güncelle
+                if (prevTrades.length !== updatedTrades.length || updatedTrades.length > 0) {
                   if (updatedTrades.length > 0) {
                     localStorage.setItem('activeTrades', JSON.stringify(updatedTrades));
                   } else {
@@ -610,8 +705,8 @@ export default function TradingSimulator() {
         console.error(`WebSocket bağlantı kurma hatası (${symbol}):`, connectionError);
       }
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [takeProfitOrders, stopLossOrders]);
 
   // Fallback fiyat güncelleme - 5 saniyede bir REST API ile fiyat çek
   const fallbackPriceUpdate = useCallback(() => {
@@ -660,7 +755,6 @@ export default function TradingSimulator() {
           
           // Bu sembole ait tüm aktif trade'leri güncelle
           setActiveTrades(prevTrades => {
-            let hasUpdated = false;
             const updatedTrades = prevTrades.map(trade => {
               if (trade.symbol === symbol && trade.isActive) {
                 console.log(`Fallback ile trade güncelleniyor: ${symbol} - Fiyat: ${newPrice} - Trade ID: ${trade.id}`);
@@ -670,6 +764,31 @@ export default function TradingSimulator() {
                   console.log(`LİKİDASYON (Fallback): Fiyat: ${newPrice}, Liq Fiyatı: ${trade.liquidationPrice.toFixed(2)} - Trade ID: ${trade.id}`);
                   handleLiquidation(trade, newPrice);
                   return null;
+                }
+
+                // Take Profit ve Stop Loss kontrolü
+                const tpSlResult = checkTakeProfitStopLoss(newPrice, trade)
+                if (tpSlResult.shouldClose) {
+                  // PnL hesapla
+                  const positionSize = (trade.leverage * trade.investment) / trade.entryPrice
+                  const pnl = trade.type === 'long' 
+                    ? (newPrice - trade.entryPrice) * positionSize
+                    : (trade.entryPrice - newPrice) * positionSize
+                  const roi = (pnl / trade.investment) * 100
+                  
+                  const closedTrade = { ...trade, currentPrice: newPrice, pnl, roi }
+                  
+                  // Geçmişe kaydet
+                  saveTradeToHistory(closedTrade, 'completed')
+                  
+                  // TP/SL emirlerini temizle
+                  setTakeProfitOrders(prev => prev.filter(tp => tp.tradeId !== trade.id))
+                  setStopLossOrders(prev => prev.filter(sl => sl.tradeId !== trade.id))
+                  localStorage.setItem('takeProfitOrders', JSON.stringify(takeProfitOrders.filter(tp => tp.tradeId !== trade.id)))
+                  localStorage.setItem('stopLossOrders', JSON.stringify(stopLossOrders.filter(sl => sl.tradeId !== trade.id)))
+                  
+                  console.log(`✅ ${tpSlResult.reason === 'tp' ? 'TAKE PROFIT' : 'STOP LOSS'} - Trade kapatıldı: ${trade.id}`)
+                  return null; // Trade kapatıldı
                 }
                 
                 const positionSize = (trade.leverage * trade.investment) / trade.entryPrice;
@@ -691,14 +810,13 @@ export default function TradingSimulator() {
                 };
                 
                 console.log(`Fallback ile yeni PnL: ${pnl.toFixed(2)} - ROI: ${roi.toFixed(2)}% - Trade ID: ${trade.id}`);
-                hasUpdated = true;
                 return updatedTrade;
               }
               return trade;
             }).filter(trade => trade !== null);
             
-            // Sadece gerçekten güncelleme yapıldıysa localStorage'ı güncelle
-            if (hasUpdated) {
+            // Trade sayısı değiştiyse veya herhangi bir güncelleme varsa localStorage'ı güncelle
+            if (prevTrades.length !== updatedTrades.length || updatedTrades.length > 0) {
               if (updatedTrades.length > 0) {
                 localStorage.setItem('activeTrades', JSON.stringify(updatedTrades));
               } else {
@@ -713,8 +831,8 @@ export default function TradingSimulator() {
         console.error(`Fallback fiyat güncelleme hatası (${symbol}):`, error);
       }
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTrades, selectedPair]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTrades, selectedPair, takeProfitOrders, stopLossOrders]);
 
   // WebSocket bağlantısı (eski sistem - geriye uyumluluk için)
   const connectWebSocket = useCallback((symbol: string) => {
@@ -798,7 +916,32 @@ export default function TradingSimulator() {
                     handleLiquidation(trade, newPrice)
                     return null // Bu trade'i listeden çıkar
                   }
-                  
+
+                  // Take Profit ve Stop Loss kontrolü
+                  const tpSlResult = checkTakeProfitStopLoss(newPrice, trade)
+                  if (tpSlResult.shouldClose) {
+                    // PnL hesapla
+                    const positionSize = (trade.leverage * trade.investment) / trade.entryPrice
+                    const pnl = trade.type === 'long' 
+                      ? (newPrice - trade.entryPrice) * positionSize
+                      : (trade.entryPrice - newPrice) * positionSize
+                    const roi = (pnl / trade.investment) * 100
+                    
+                    const closedTrade = { ...trade, currentPrice: newPrice, pnl, roi }
+                    
+                    // Geçmişe kaydet
+                    saveTradeToHistory(closedTrade, 'completed')
+                    
+                    // TP/SL emirlerini temizle
+                    setTakeProfitOrders(prev => prev.filter(tp => tp.tradeId !== trade.id))
+                    setStopLossOrders(prev => prev.filter(sl => sl.tradeId !== trade.id))
+                    localStorage.setItem('takeProfitOrders', JSON.stringify(takeProfitOrders.filter(tp => tp.tradeId !== trade.id)))
+                    localStorage.setItem('stopLossOrders', JSON.stringify(stopLossOrders.filter(sl => sl.tradeId !== trade.id)))
+                    
+                    console.log(`✅ ${tpSlResult.reason === 'tp' ? 'TAKE PROFIT' : 'STOP LOSS'} - Trade kapatıldı: ${trade.id}`)
+                    return null // Trade kapatıldı
+                  }
+
                   const positionSize = (trade.leverage * trade.investment) / trade.entryPrice
                   let pnl = 0
                   
@@ -822,13 +965,15 @@ export default function TradingSimulator() {
                   return updatedTrade
                 }
                 return trade
-              }).filter(trade => trade !== null) // Likidite olanları çıkar
+              }).filter(trade => trade !== null) // Likidite ve TP/SL tetiklenenleri çıkar
               
-              // Güncellenmiş trade'leri localStorage'a kaydet
-              if (updatedTrades.length > 0) {
-                localStorage.setItem('activeTrades', JSON.stringify(updatedTrades))
-              } else {
-                localStorage.removeItem('activeTrades')
+              // Trade sayısı değiştiyse veya herhangi bir güncelleme varsa localStorage'ı güncelle
+              if (prevTrades.length !== updatedTrades.length || updatedTrades.length > 0) {
+                if (updatedTrades.length > 0) {
+                  localStorage.setItem('activeTrades', JSON.stringify(updatedTrades))
+                } else {
+                  localStorage.removeItem('activeTrades')
+                }
               }
               
               return updatedTrades
@@ -896,8 +1041,8 @@ export default function TradingSimulator() {
         }, 5000)
       }
     }, 100)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [takeProfitOrders, stopLossOrders])
 
   // Trading çifti değiştiğinde WebSocket'i yeniden bağla ve fiyatı güncelle
   useEffect(() => {
@@ -980,31 +1125,51 @@ export default function TradingSimulator() {
       
       // Tetiklenen emirleri trade'e çevir
       if (ordersToActivate.length > 0) {
-        ordersToActivate.forEach(order => {
-          const liquidationPrice = calculateLiquidationPrice(order.targetPrice, order.leverage, order.type)
+        setActiveTrades(prev => {
+          const updatedTrades = [...prev]
           
-          const newTrade: TradeData = {
-            id: `trade_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-            symbol: order.symbol,
-            type: order.type,
-            entryPrice: order.targetPrice,
-            leverage: order.leverage,
-            investment: order.investment,
-            currentPrice: currentPrice,
-            pnl: 0,
-            roi: 0,
-            liquidationPrice,
-            isActive: true,
-            startTime: new Date()
-          }
-          
-          setActiveTrades(prev => {
-            const updated = [...prev, newTrade]
-            localStorage.setItem('activeTrades', JSON.stringify(updated))
-            return updated
+          ordersToActivate.forEach(order => {
+            // Aynı emir için zaten trade açılmış mı kontrol et (race condition önleme)
+            const alreadyExists = prev.some(trade => 
+              trade.symbol === order.symbol && 
+              trade.type === order.type && 
+              trade.entryPrice === order.targetPrice &&
+              trade.leverage === order.leverage &&
+              trade.investment === order.investment &&
+              Math.abs(trade.startTime.getTime() - Date.now()) < 2000 // Son 2 saniyede açılmış
+            )
+            
+            if (alreadyExists) {
+              console.log(`⚠️ Bu emir için zaten trade açılmış, tekrar açılmıyor: ${order.symbol}`)
+              return
+            }
+            
+            const liquidationPrice = calculateLiquidationPrice(order.targetPrice, order.leverage, order.type)
+            
+            const newTrade: TradeData = {
+              id: `trade_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+              symbol: order.symbol,
+              type: order.type,
+              entryPrice: order.targetPrice,
+              leverage: order.leverage,
+              investment: order.investment,
+              currentPrice: currentPrice,
+              pnl: 0,
+              roi: 0,
+              liquidationPrice,
+              isActive: true,
+              startTime: new Date()
+            }
+            
+            updatedTrades.push(newTrade)
+            console.log(`✅ Emir trade'e dönüştürüldü: ${newTrade.symbol} - ${newTrade.type} @ $${newTrade.entryPrice}`)
           })
           
-          console.log(`✅ Emir trade'e dönüştürüldü: ${newTrade.symbol} - ${newTrade.type} @ $${newTrade.entryPrice}`)
+          if (updatedTrades.length > prev.length) {
+            localStorage.setItem('activeTrades', JSON.stringify(updatedTrades))
+          }
+          
+          return updatedTrades
         })
       }
       
@@ -1022,6 +1187,35 @@ export default function TradingSimulator() {
       return true
     }
     return false
+  }, [])
+
+  // Trade geçmişini kaydetme fonksiyonu
+  const saveTradeToHistory = useCallback((tradeData: TradeData, status: 'completed' | 'liquidated' = 'completed') => {
+    const endTime = new Date()
+    const duration = Math.round((endTime.getTime() - tradeData.startTime.getTime()) / 60000) // dakika
+    
+    const historyEntry: TradeHistory = {
+      id: `trade_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      symbol: tradeData.symbol,
+      type: tradeData.type,
+      entryPrice: tradeData.entryPrice,
+      exitPrice: tradeData.currentPrice,
+      leverage: tradeData.leverage,
+      investment: tradeData.investment,
+      pnl: tradeData.pnl,
+      roi: tradeData.roi,
+      startTime: tradeData.startTime,
+      endTime,
+      duration,
+      status
+    }
+    
+    setTradeHistory(prev => {
+      const newHistory = [historyEntry, ...prev].slice(0, 50) // Son 50 kaydı tut
+      localStorage.setItem('tradeHistory', JSON.stringify(newHistory))
+      console.log('📈 Trade geçmişe kaydedildi:', historyEntry)
+      return newHistory
+    })
   }, [])
 
   // Liquidation işlemi
@@ -1046,7 +1240,7 @@ export default function TradingSimulator() {
     
     // Trade'i kapat
     // Artık çoklu trade sisteminde kullanılmıyor
-  }, [])
+  }, [saveTradeToHistory])
 
   // Trade başlat
   const startTrade = () => {
@@ -1063,7 +1257,19 @@ export default function TradingSimulator() {
     }
     
     // Manuel fiyat varsa ve mevcut fiyattan farklıysa bekleyen emire ekle
-    if (manualPrice !== null && Math.abs(manualPrice - currentPrice) > 0.01) {
+    // Yüzde bazlı threshold: Çok düşük (%0.05) - Manuel fiyat girildiyse neredeyse her zaman emir oluştur
+    const priceThreshold = currentPrice * 0.0005; // %0.05 - Çok hassas
+    const priceDifference = Math.abs(manualPrice !== null ? manualPrice - currentPrice : 0);
+    
+    console.log('📊 [Emir Kontrolü]', {
+      manualPrice,
+      currentPrice,
+      threshold: priceThreshold.toFixed(2),
+      difference: priceDifference.toFixed(2),
+      shouldCreateOrder: priceDifference >= priceThreshold
+    });
+    
+    if (manualPrice !== null && priceDifference >= priceThreshold) {
       const newOrder: PendingOrder = {
         id: `order_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         symbol: selectedPair,
@@ -1137,35 +1343,6 @@ export default function TradingSimulator() {
       }, 100)
     }, 1000)
   }
-
-  // Trade geçmişini kaydetme fonksiyonu
-  const saveTradeToHistory = (tradeData: TradeData, status: 'completed' | 'liquidated' = 'completed') => {
-    const endTime = new Date()
-    const duration = Math.round((endTime.getTime() - tradeData.startTime.getTime()) / 60000) // dakika
-    
-    const historyEntry: TradeHistory = {
-      id: `trade_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      symbol: tradeData.symbol,
-      type: tradeData.type,
-      entryPrice: tradeData.entryPrice,
-      exitPrice: tradeData.currentPrice,
-      leverage: tradeData.leverage,
-      investment: tradeData.investment,
-      pnl: tradeData.pnl,
-      roi: tradeData.roi,
-      startTime: tradeData.startTime,
-      endTime,
-      duration,
-      status
-    }
-    
-    setTradeHistory(prev => {
-      const newHistory = [historyEntry, ...prev].slice(0, 50) // Son 50 kaydı tut
-      localStorage.setItem('tradeHistory', JSON.stringify(newHistory))
-      console.log('📈 Trade geçmişe kaydedildi:', historyEntry)
-      return newHistory
-    })
-  }
   
   // Bekleyen emri iptal et
   const cancelPendingOrder = (orderId: string) => {
@@ -1176,6 +1353,124 @@ export default function TradingSimulator() {
       return updated
     })
   }
+
+  // Take Profit oluştur
+  const createTakeProfit = (tradeId: string, targetPrice: number) => {
+    const trade = activeTrades.find(t => t.id === tradeId)
+    if (!trade) return
+
+    // PnL hesapla
+    const positionSize = (trade.leverage * trade.investment) / trade.entryPrice
+    let expectedPnL = 0
+    if (trade.type === 'long') {
+      expectedPnL = (targetPrice - trade.entryPrice) * positionSize
+    } else {
+      expectedPnL = (trade.entryPrice - targetPrice) * positionSize
+    }
+    const expectedROI = (expectedPnL / trade.investment) * 100
+
+    const tpOrder: TakeProfitOrder = {
+      tradeId,
+      targetPrice,
+      expectedPnL,
+      expectedROI
+    }
+
+    setTakeProfitOrders(prev => {
+      // Aynı trade için varsa güncelle, yoksa ekle
+      const filtered = prev.filter(tp => tp.tradeId !== tradeId)
+      const updated = [...filtered, tpOrder]
+      localStorage.setItem('takeProfitOrders', JSON.stringify(updated))
+      console.log(`✅ Take Profit oluşturuldu: ${trade.symbol} @ $${targetPrice} - Beklenen: ${expectedPnL.toFixed(2)}`)
+      return updated
+    })
+  }
+
+  // Stop Loss oluştur
+  const createStopLoss = (tradeId: string, targetPrice: number) => {
+    const trade = activeTrades.find(t => t.id === tradeId)
+    if (!trade) return
+
+    // Loss hesapla
+    const positionSize = (trade.leverage * trade.investment) / trade.entryPrice
+    let expectedLoss = 0
+    if (trade.type === 'long') {
+      expectedLoss = (targetPrice - trade.entryPrice) * positionSize
+    } else {
+      expectedLoss = (trade.entryPrice - targetPrice) * positionSize
+    }
+    const expectedROI = (expectedLoss / trade.investment) * 100
+
+    const slOrder: StopLossOrder = {
+      tradeId,
+      targetPrice,
+      expectedLoss,
+      expectedROI
+    }
+
+    setStopLossOrders(prev => {
+      // Aynı trade için varsa güncelle, yoksa ekle
+      const filtered = prev.filter(sl => sl.tradeId !== tradeId)
+      const updated = [...filtered, slOrder]
+      localStorage.setItem('stopLossOrders', JSON.stringify(updated))
+      console.log(`✅ Stop Loss oluşturuldu: ${trade.symbol} @ $${targetPrice} - Beklenen: ${expectedLoss.toFixed(2)}`)
+      return updated
+    })
+  }
+
+  // Take Profit/Stop Loss iptal et
+  const cancelTakeProfit = (tradeId: string) => {
+    setTakeProfitOrders(prev => {
+      const updated = prev.filter(tp => tp.tradeId !== tradeId)
+      localStorage.setItem('takeProfitOrders', JSON.stringify(updated))
+      return updated
+    })
+  }
+
+  const cancelStopLoss = (tradeId: string) => {
+    setStopLossOrders(prev => {
+      const updated = prev.filter(sl => sl.tradeId !== tradeId)
+      localStorage.setItem('stopLossOrders', JSON.stringify(updated))
+      return updated
+    })
+  }
+
+  // Take Profit ve Stop Loss kontrolü - SADECE KONTROL YAPAR, GERİYE TRADE'İ VEYA NULL DÖNER
+  const checkTakeProfitStopLoss = useCallback((currentPrice: number, trade: TradeData): { shouldClose: boolean, reason?: 'tp' | 'sl', targetPrice?: number } => {
+    // Take Profit kontrolü
+    const tpOrder = takeProfitOrders.find(tp => tp.tradeId === trade.id)
+    if (tpOrder) {
+      console.log(`[TP Check] ${trade.symbol} - Güncel: $${currentPrice.toFixed(2)}, TP Hedef: $${tpOrder.targetPrice.toFixed(2)}, Tip: ${trade.type}`)
+      
+      const tpReached = trade.type === 'long' 
+        ? currentPrice >= tpOrder.targetPrice 
+        : currentPrice <= tpOrder.targetPrice
+
+      if (tpReached) {
+        console.log(`🎯 TAKE PROFIT TETİKLENDİ! ${trade.symbol} @ $${currentPrice.toFixed(2)} (Hedef: $${tpOrder.targetPrice.toFixed(2)})`)
+        console.log(`Trade ID: ${trade.id} - Pozisyon kapatılıyor...`)
+        return { shouldClose: true, reason: 'tp', targetPrice: tpOrder.targetPrice }
+      }
+    }
+
+    // Stop Loss kontrolü
+    const slOrder = stopLossOrders.find(sl => sl.tradeId === trade.id)
+    if (slOrder) {
+      console.log(`[SL Check] ${trade.symbol} - Güncel: $${currentPrice.toFixed(2)}, SL Hedef: $${slOrder.targetPrice.toFixed(2)}, Tip: ${trade.type}`)
+      
+      const slReached = trade.type === 'long'
+        ? currentPrice <= slOrder.targetPrice
+        : currentPrice >= slOrder.targetPrice
+
+      if (slReached) {
+        console.log(`🛑 STOP LOSS TETİKLENDİ! ${trade.symbol} @ $${currentPrice.toFixed(2)} (Hedef: $${slOrder.targetPrice.toFixed(2)})`)
+        console.log(`Trade ID: ${trade.id} - Pozisyon kapatılıyor...`)
+        return { shouldClose: true, reason: 'sl', targetPrice: slOrder.targetPrice }
+      }
+    }
+
+    return { shouldClose: false }
+  }, [takeProfitOrders, stopLossOrders])
   
   const closeTrade = (tradeId?: string) => {
     if (activeTrades.length === 0) return
@@ -1191,6 +1486,12 @@ export default function TradingSimulator() {
     setTimeout(() => {
       // Trade'i geçmişe kaydet
       saveTradeToHistory(targetTrade, 'completed')
+      
+      // TP/SL emirlerini temizle
+      if (targetTradeId) {
+        cancelTakeProfit(targetTradeId)
+        cancelStopLoss(targetTradeId)
+      }
       
       // Belirtilen trade'i aktif listeden çıkar
       setActiveTrades(prev => {
@@ -1350,6 +1651,26 @@ export default function TradingSimulator() {
     pair.symbol.toLowerCase().includes(searchTerm.toLowerCase()) ||
     pair.baseAsset.toLowerCase().includes(searchTerm.toLowerCase())
   )
+
+  // Süre formatlama (kullanıcı dostu)
+  const formatDuration = (startTime: Date) => {
+    const now = new Date()
+    const diff = now.getTime() - new Date(startTime).getTime()
+    const seconds = Math.floor(diff / 1000)
+    const minutes = Math.floor(seconds / 60)
+    const hours = Math.floor(minutes / 60)
+    const days = Math.floor(hours / 24)
+    
+    if (days > 0) {
+      return `${days}g ${hours % 24}sa`
+    } else if (hours > 0) {
+      return `${hours}sa ${minutes % 60}dk`
+    } else if (minutes > 0) {
+      return `${minutes}dk ${seconds % 60}sn`
+    } else {
+      return `${seconds}sn`
+    }
+  }
 
   // Fiyat formatla
   const formatPrice = (price: number) => {
@@ -1533,7 +1854,7 @@ export default function TradingSimulator() {
                       />
                       <div className="flex flex-col ml-1">
                         <button 
-                          onClick={() => setManualPrice((manualPrice !== null ? manualPrice : currentPrice) + (currentPrice * 0.001))}
+                          onClick={() => setManualPrice((manualPrice !== null ? manualPrice : currentPrice) + (currentPrice * 0.0025))}
                           className="text-gray-400 hover:text-white p-1"
                         >
                           <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1541,7 +1862,7 @@ export default function TradingSimulator() {
                           </svg>
                         </button>
                         <button 
-                          onClick={() => setManualPrice((manualPrice !== null ? manualPrice : currentPrice) - (currentPrice * 0.001))}
+                          onClick={() => setManualPrice((manualPrice !== null ? manualPrice : currentPrice) - (currentPrice * 0.0025))}
                           className="text-gray-400 hover:text-white p-1"
                         >
                           <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1793,7 +2114,7 @@ export default function TradingSimulator() {
                   <div className="space-y-3 max-h-[80vh] overflow-y-auto">
                     {activeTrades.map((trade) => (
                       <div key={trade.id} className="bg-gray-700/30 rounded-xl p-4 border border-gray-600/50">
-                        <div className="flex justify-between items-center mb-3">
+                        <div className="flex justify-between items-center mb-2">
                           <div className="flex items-center space-x-2">
                             <span className="font-bold text-lg">{trade.symbol.replace('USDT', '/USDT')}</span>
                             <span className={`px-2 py-1 rounded-full text-xs font-bold ${
@@ -1811,6 +2132,13 @@ export default function TradingSimulator() {
                           >
                             ✕
                           </button>
+                        </div>
+                        
+                        {/* Süre Göstergesi */}
+                        <div className="mb-3 flex items-center">
+                          <span className="text-xs text-gray-400 bg-gray-800/50 px-2 py-0.5 rounded-md inline-flex items-center">
+                            🕐 {formatDuration(trade.startTime)}
+                          </span>
                         </div>
                         
                         <div className="grid grid-cols-2 gap-2 text-sm">
@@ -1837,27 +2165,85 @@ export default function TradingSimulator() {
                           </div>
                         </div>
                         
-                        <div className="mt-2 text-xs text-gray-400 flex justify-between items-center">
-                          <span>
-                            Liq: <span className={`${
-                              (trade.type === 'long' && trade.currentPrice <= trade.liquidationPrice) ||
-                              (trade.type === 'short' && trade.currentPrice >= trade.liquidationPrice)
-                                ? 'text-red-400 font-bold' : 'text-orange-400'
-                            }`}>
-                              ${formatPrice(trade.liquidationPrice)}
+                        <div className="mt-2 text-xs text-gray-400">
+                          <div className="flex justify-between items-center mb-2">
+                            <span>
+                              Liq: <span className={`${
+                                (trade.type === 'long' && trade.currentPrice <= trade.liquidationPrice) ||
+                                (trade.type === 'short' && trade.currentPrice >= trade.liquidationPrice)
+                                  ? 'text-red-400 font-bold' : 'text-orange-400'
+                              }`}>
+                                ${formatPrice(trade.liquidationPrice)}
+                              </span>
                             </span>
-                          </span>
-                          <button
-                            onClick={() => {
-                              setSelectedTradeId(trade.id)
-                              setUsernameInput(username)
-                              setShowUsernameModal(true)
-                            }}
-                            className="bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 px-2 py-1 rounded-lg text-xs transition-colors flex items-center space-x-1"
-                          >
-                            <span>📸</span>
-                            <span>Paylaş</span>
-                          </button>
+                          </div>
+                          
+                          {/* TP/SL ve Paylaş Butonları */}
+                          <div className="grid grid-cols-3 gap-1.5 mt-2">
+                            <button
+                              onClick={() => {
+                                setTpSlTradeId(trade.id)
+                                setTpSlPrice('')
+                                setShowTakeProfitModal(true)
+                              }}
+                              className={`${
+                                takeProfitOrders.find(tp => tp.tradeId === trade.id)
+                                  ? 'bg-green-600/40 text-green-300 border border-green-400/50'
+                                  : 'bg-green-600/20 hover:bg-green-600/30 text-green-400'
+                              } px-2 py-1.5 rounded-lg text-xs transition-colors flex items-center justify-center space-x-1 font-medium`}
+                            >
+                              <span>💰</span>
+                              <span className="hidden sm:inline">KAR AL</span>
+                              <span className="sm:hidden">KA</span>
+                            </button>
+                            
+                            <button
+                              onClick={() => {
+                                setTpSlTradeId(trade.id)
+                                setTpSlPrice('')
+                                setShowStopLossModal(true)
+                              }}
+                              className={`${
+                                stopLossOrders.find(sl => sl.tradeId === trade.id)
+                                  ? 'bg-red-600/40 text-red-300 border border-red-400/50'
+                                  : 'bg-red-600/20 hover:bg-red-600/30 text-red-400'
+                              } px-2 py-1.5 rounded-lg text-xs transition-colors flex items-center justify-center space-x-1 font-medium`}
+                            >
+                              <span>🛑</span>
+                              <span className="hidden sm:inline">ZRR KES</span>
+                              <span className="sm:hidden">ZK</span>
+                            </button>
+                            
+                            <button
+                              onClick={() => {
+                                setSelectedTradeId(trade.id)
+                                setUsernameInput(username)
+                                setShowUsernameModal(true)
+                              }}
+                              className="bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 px-2 py-1.5 rounded-lg text-xs transition-colors flex items-center justify-center space-x-1"
+                            >
+                              <span>📸</span>
+                              <span className="hidden sm:inline">Paylaş</span>
+                            </button>
+                          </div>
+                          
+                          {/* TP/SL Göstergesi */}
+                          {(takeProfitOrders.find(tp => tp.tradeId === trade.id) || stopLossOrders.find(sl => sl.tradeId === trade.id)) && (
+                            <div className="mt-2 pt-2 border-t border-gray-600/30 space-y-1">
+                              {takeProfitOrders.find(tp => tp.tradeId === trade.id) && (
+                                <div className="flex justify-between text-[10px]">
+                                  <span className="text-green-400">🎯 TP:</span>
+                                  <span className="text-green-300 font-medium">${formatPrice(takeProfitOrders.find(tp => tp.tradeId === trade.id)!.targetPrice)}</span>
+                                </div>
+                              )}
+                              {stopLossOrders.find(sl => sl.tradeId === trade.id) && (
+                                <div className="flex justify-between text-[10px]">
+                                  <span className="text-red-400">🛑 SL:</span>
+                                  <span className="text-red-300 font-medium">${formatPrice(stopLossOrders.find(sl => sl.tradeId === trade.id)!.targetPrice)}</span>
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -3051,6 +3437,290 @@ export default function TradingSimulator() {
       </div>
 
       {/* CSS Animasyonları */}
+      {/* Take Profit Modal */}
+      {showTakeProfitModal && tpSlTradeId && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowTakeProfitModal(false)}>
+          <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl p-6 max-w-md w-full border border-green-500/30 shadow-2xl shadow-green-500/20" onClick={(e) => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-bold text-green-400 flex items-center">
+                <span className="mr-2">💰</span> Kar Al (Take Profit)
+              </h3>
+              <button
+                onClick={() => setShowTakeProfitModal(false)}
+                className="text-gray-400 hover:text-white text-2xl transition-colors"
+              >
+                ×
+              </button>
+            </div>
+            
+            {(() => {
+              const trade = activeTrades.find(t => t.id === tpSlTradeId)
+              if (!trade) return null
+              
+              const existingTP = takeProfitOrders.find(tp => tp.tradeId === tpSlTradeId)
+              const defaultPrice = existingTP?.targetPrice || trade.currentPrice
+              const priceValue = tpSlPrice ? parseFloat(tpSlPrice) : defaultPrice
+              
+              // PnL hesaplama
+              const positionSize = (trade.leverage * trade.investment) / trade.entryPrice
+              let expectedPnL = 0
+              if (trade.type === 'long') {
+                expectedPnL = (priceValue - trade.entryPrice) * positionSize
+              } else {
+                expectedPnL = (trade.entryPrice - priceValue) * positionSize
+              }
+              const expectedROI = (expectedPnL / trade.investment) * 100
+              
+              // Minimum kar kontrolü
+              const isValidTP = trade.type === 'long' ? priceValue > trade.entryPrice : priceValue < trade.entryPrice
+              
+              return (
+                <>
+                  <div className="bg-gray-800/50 rounded-xl p-4 mb-4 border border-gray-700/50">
+                    <div className="text-sm space-y-2">
+                      <div className="flex justify-between">
+                        <span className="text-gray-400">Pozisyon:</span>
+                        <span className="text-white font-medium">{trade.symbol} {trade.type === 'long' ? '📈 LONG' : '📉 SHORT'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-400">Giriş Fiyatı:</span>
+                        <span className="text-white font-mono">${formatPrice(trade.entryPrice)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-400">Güncel Fiyat:</span>
+                        <span className="text-white font-mono">${formatPrice(trade.currentPrice)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-400">Kaldıraç:</span>
+                        <span className="text-white font-medium">{trade.leverage}x</span>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <div className="mb-4">
+                    <label className="block text-sm font-medium text-gray-300 mb-2">
+                      Hedef Kar Fiyatı
+                    </label>
+                    <input
+                      type="number"
+                      value={tpSlPrice || defaultPrice}
+                      onChange={(e) => setTpSlPrice(e.target.value)}
+                      placeholder={`${trade.type === 'long' ? 'Giriş fiyatından yüksek' : 'Giriş fiyatından düşük'}`}
+                      className="w-full bg-gray-700/50 border border-gray-600 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-green-500 font-mono"
+                      step="0.00000001"
+                      onFocus={(e) => e.target.select()}
+                    />
+                    <p className="text-xs text-gray-400 mt-1">
+                      {trade.type === 'long' 
+                        ? '💡 LONG pozisyonunda kar için fiyat yükselmelidir' 
+                        : '💡 SHORT pozisyonunda kar için fiyat düşmelidir'}
+                    </p>
+                  </div>
+                  
+                  {/* Beklenen Kar Göstergesi */}
+                  <div className={`rounded-xl p-4 mb-4 border-2 ${
+                    isValidTP && expectedPnL > 0
+                      ? 'bg-green-900/30 border-green-500/50'
+                      : 'bg-red-900/30 border-red-500/50'
+                  }`}>
+                    <div className="text-center">
+                      <div className="text-xs text-gray-300 mb-1">Beklenen Kar/Zarar</div>
+                      <div className={`text-2xl font-bold mb-1 ${
+                        isValidTP && expectedPnL > 0 ? 'text-green-400' : 'text-red-400'
+                      }`}>
+                        {formatPnL(expectedPnL)}
+                      </div>
+                      <div className={`text-sm ${
+                        isValidTP && expectedPnL > 0 ? 'text-green-300' : 'text-red-300'
+                      }`}>
+                        {expectedROI >= 0 ? '+' : ''}{expectedROI.toFixed(2)}% ROI
+                      </div>
+                    </div>
+                  </div>
+                  
+                  {!isValidTP && priceValue !== trade.currentPrice && (
+                    <div className="bg-yellow-900/30 border border-yellow-500/50 rounded-lg p-3 mb-4">
+                      <p className="text-yellow-300 text-sm flex items-center">
+                        <span className="mr-2">⚠️</span>
+                        {trade.type === 'long' 
+                          ? 'Kar al fiyatı, giriş fiyatından yüksek olmalıdır!'
+                          : 'Kar al fiyatı, giriş fiyatından düşük olmalıdır!'}
+                      </p>
+                    </div>
+                  )}
+                  
+                  <div className="flex space-x-3">
+                    {existingTP && (
+                      <button
+                        onClick={() => {
+                          cancelTakeProfit(tpSlTradeId)
+                          setShowTakeProfitModal(false)
+                        }}
+                        className="flex-1 bg-red-600/20 hover:bg-red-600/30 text-red-400 font-bold py-3 px-4 rounded-lg transition-colors border border-red-500/30"
+                      >
+                        🗑️ İptal Et
+                      </button>
+                    )}
+                    <button
+                      onClick={() => {
+                        const price = parseFloat(tpSlPrice || existingTP?.targetPrice?.toString() || '0')
+                        if (price > 0 && isValidTP) {
+                          createTakeProfit(tpSlTradeId, price)
+                          setShowTakeProfitModal(false)
+                          setTpSlPrice('')
+                        }
+                      }}
+                      disabled={!isValidTP || !priceValue}
+                      className="flex-1 bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {existingTP ? '✏️ Güncelle' : '✅ Kaydet'}
+                    </button>
+                  </div>
+                </>
+              )
+            })()}
+          </div>
+        </div>
+      )}
+
+      {/* Stop Loss Modal */}
+      {showStopLossModal && tpSlTradeId && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowStopLossModal(false)}>
+          <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl p-6 max-w-md w-full border border-red-500/30 shadow-2xl shadow-red-500/20" onClick={(e) => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-bold text-red-400 flex items-center">
+                <span className="mr-2">🛑</span> Zarar Kes (Stop Loss)
+              </h3>
+              <button
+                onClick={() => setShowStopLossModal(false)}
+                className="text-gray-400 hover:text-white text-2xl transition-colors"
+              >
+                ×
+              </button>
+            </div>
+            
+            {(() => {
+              const trade = activeTrades.find(t => t.id === tpSlTradeId)
+              if (!trade) return null
+              
+              const existingSL = stopLossOrders.find(sl => sl.tradeId === tpSlTradeId)
+              const defaultPrice = existingSL?.targetPrice || trade.currentPrice
+              const priceValue = tpSlPrice ? parseFloat(tpSlPrice) : defaultPrice
+              
+              // Loss hesaplama
+              const positionSize = (trade.leverage * trade.investment) / trade.entryPrice
+              let expectedLoss = 0
+              if (trade.type === 'long') {
+                expectedLoss = (priceValue - trade.entryPrice) * positionSize
+              } else {
+                expectedLoss = (trade.entryPrice - priceValue) * positionSize
+              }
+              const expectedROI = (expectedLoss / trade.investment) * 100
+              
+              // Zarar kesme kontrolü
+              const isValidSL = trade.type === 'long' ? priceValue < trade.entryPrice : priceValue > trade.entryPrice
+              
+              return (
+                <>
+                  <div className="bg-gray-800/50 rounded-xl p-4 mb-4 border border-gray-700/50">
+                    <div className="text-sm space-y-2">
+                      <div className="flex justify-between">
+                        <span className="text-gray-400">Pozisyon:</span>
+                        <span className="text-white font-medium">{trade.symbol} {trade.type === 'long' ? '📈 LONG' : '📉 SHORT'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-400">Giriş Fiyatı:</span>
+                        <span className="text-white font-mono">${formatPrice(trade.entryPrice)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-400">Güncel Fiyat:</span>
+                        <span className="text-white font-mono">${formatPrice(trade.currentPrice)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-400">Likidite:</span>
+                        <span className="text-orange-400 font-mono">${formatPrice(trade.liquidationPrice)}</span>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <div className="mb-4">
+                    <label className="block text-sm font-medium text-gray-300 mb-2">
+                      Zarar Kesme Fiyatı
+                    </label>
+                    <input
+                      type="number"
+                      value={tpSlPrice || defaultPrice}
+                      onChange={(e) => setTpSlPrice(e.target.value)}
+                      placeholder={`${trade.type === 'long' ? 'Giriş fiyatından düşük' : 'Giriş fiyatından yüksek'}`}
+                      className="w-full bg-gray-700/50 border border-gray-600 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-red-500 font-mono"
+                      step="0.00000001"
+                      onFocus={(e) => e.target.select()}
+                    />
+                    <p className="text-xs text-gray-400 mt-1">
+                      {trade.type === 'long' 
+                        ? '🛡️ LONG pozisyonunda zararı kesmek için giriş altında' 
+                        : '🛡️ SHORT pozisyonunda zararı kesmek için giriş üstünde'}
+                    </p>
+                  </div>
+                  
+                  {/* Beklenen Zarar Göstergesi */}
+                  <div className="bg-red-900/30 border-2 border-red-500/50 rounded-xl p-4 mb-4">
+                    <div className="text-center">
+                      <div className="text-xs text-gray-300 mb-1">Beklenen Zarar</div>
+                      <div className="text-2xl font-bold text-red-400 mb-1">
+                        {formatPnL(expectedLoss)}
+                      </div>
+                      <div className="text-sm text-red-300">
+                        {expectedROI >= 0 ? '+' : ''}{expectedROI.toFixed(2)}% ROI
+                      </div>
+                    </div>
+                  </div>
+                  
+                  {!isValidSL && priceValue !== trade.currentPrice && (
+                    <div className="bg-yellow-900/30 border border-yellow-500/50 rounded-lg p-3 mb-4">
+                      <p className="text-yellow-300 text-sm flex items-center">
+                        <span className="mr-2">⚠️</span>
+                        {trade.type === 'long' 
+                          ? 'Stop loss fiyatı, giriş fiyatından düşük olmalıdır!'
+                          : 'Stop loss fiyatı, giriş fiyatından yüksek olmalıdır!'}
+                      </p>
+                    </div>
+                  )}
+                  
+                  <div className="flex space-x-3">
+                    {existingSL && (
+                      <button
+                        onClick={() => {
+                          cancelStopLoss(tpSlTradeId)
+                          setShowStopLossModal(false)
+                        }}
+                        className="flex-1 bg-gray-600/20 hover:bg-gray-600/30 text-gray-400 font-bold py-3 px-4 rounded-lg transition-colors border border-gray-500/30"
+                      >
+                        🗑️ İptal Et
+                      </button>
+                    )}
+                    <button
+                      onClick={() => {
+                        const price = parseFloat(tpSlPrice || existingSL?.targetPrice?.toString() || '0')
+                        if (price > 0 && isValidSL) {
+                          createStopLoss(tpSlTradeId, price)
+                          setShowStopLossModal(false)
+                          setTpSlPrice('')
+                        }
+                      }}
+                      disabled={!isValidSL || !priceValue}
+                      className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-4 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {existingSL ? '✏️ Güncelle' : '✅ Kaydet'}
+                    </button>
+                  </div>
+                </>
+              )
+            })()}
+          </div>
+        </div>
+      )}
+
       <style jsx>{`
         .price-display {
           transition: all 0.3s ease;
